@@ -20,6 +20,8 @@ public class DistanceService : IDistanceService
 
     public void UpdateDistances(IReadOnlyCollection<DistanceData> distances)
     {
+        _logger.LogTrace("Updating {distanceCount} distances", distances.Count);
+
         foreach (DistanceData distanceData in distances)
         {
             if (!_speakers.ContainsKey(distanceData.SpeakerId))
@@ -35,6 +37,9 @@ public class DistanceService : IDistanceService
 
     public Speaker AddSpeaker()
     {
+        _logger.LogTrace("Adding speaker with ID {speakerId}; new speaker count: {speakerCount}",
+                            _maxSpeakerId, _speakers.Count);
+
         uint id = _maxSpeakerId++;
         Vector3 position = _speakers.Count switch
         {
@@ -137,6 +142,8 @@ public class DistanceService : IDistanceService
 
     public void RemoveSpeaker(uint id)
     {
+        _logger.LogTrace("Removing speaker {ID}", id);
+
         if (!_speakers.ContainsKey(id))
         {
             _logger.LogWarning("Tried to remove speaker with unknown ID {ID}", id);
@@ -158,6 +165,8 @@ public class DistanceService : IDistanceService
 
     public Vector3 GetUserPosition(IReadOnlyCollection<DistanceData> distances)
     {
+        _logger.LogTrace("Calculating user position");
+
         if (_speakers.Count < 3)
         {
             throw new InvalidOperationException($"Tried to calculate user position with only {_speakers.Count} < 3 speakers defined.");
