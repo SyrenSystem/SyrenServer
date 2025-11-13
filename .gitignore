@@ -1,6 +1,9 @@
 bin/
 obj/
 
+*.csproj.user
+
 .vscode/
 .vs/
 
+wwwroot/

@@ -1,18 +1,17 @@
-﻿using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
+﻿using Syren.Server.Hubs;
 using Syren.Server.Interfaces;
 using Syren.Server.Services;
 
-var builder = Host.CreateDefaultBuilder();
-builder.ConfigureServices(services =>
-{
-    services.AddLogging(options => options.AddConsole());
-    services.AddTransient<IDistanceService, DistanceService>();
-});
+var builder = WebApplication.CreateBuilder();
+
+builder.Services.AddLogging(options => options.AddConsole());
+builder.Services.AddSingleton<IDistanceService, DistanceService>();
+builder.Services.AddSignalR();
 
 var app = builder.Build();
 
 var distanceService = app.Services.GetRequiredService<IDistanceService>();
 
-await app.RunAsync();
+app.MapHub<DistanceHub>("/distance");
+
+app.Run();

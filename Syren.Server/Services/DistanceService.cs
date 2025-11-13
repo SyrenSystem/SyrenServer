@@ -1,5 +1,4 @@
 using System.Numerics;
-using Microsoft.Extensions.Logging;
 using Syren.Server.Interfaces;
 using Syren.Server.Models;
 
@@ -8,11 +7,143 @@ namespace Syren.Server.Services;
 public class DistanceService : IDistanceService
 {
     private readonly Dictionary<uint, Speaker> _speakers = [];
+    private readonly Dictionary<uint, float> _speakerDistances = [];
+    private uint _maxSpeakerId = 0;
+
     private readonly ILogger<DistanceService> _logger;
 
     public DistanceService(ILogger<DistanceService> logger)
     {
         _logger = logger;
+    }
+
+
+    public void UpdateDistances(IReadOnlyCollection<DistanceData> distances)
+    {
+        foreach (DistanceData distanceData in distances)
+        {
+            if (!_speakers.ContainsKey(distanceData.SpeakerId))
+            {
+                _logger.LogError("Tried to update distance of unknown speaker with ID {ID}",
+                                distanceData.SpeakerId);
+                continue;
+            }
+
+            _speakerDistances.Add(distanceData.SpeakerId, distanceData.Distance);
+        }
+    }
+
+    public Speaker AddSpeaker()
+    {
+        uint id = _maxSpeakerId++;
+        Vector3 position = _speakers.Count switch
+        {
+            0 => GetAddedFirstSpeakerPosition(),
+            1 => GetAddedSecondSpeakerPosition(),
+            2 => GetAddedThirdSpeakerPosition(),
+            _ => GetAddedTrilateratedSpeakerPosition(),
+        };
+
+        Speaker speaker = new()
+        {
+            Id = id,
+            Position = position,
+        };
+
+        _speakers.Add(speaker.Id, speaker);
+        return speaker;
+    }
+
+    private static Vector3 GetAddedFirstSpeakerPosition() => Vector3.Zero;
+
+    private Vector3 GetAddedSecondSpeakerPosition()
+    {
+        // Second speaker can be on any arbitrary point on the sphere
+        // around the first at the distance between the two
+        Speaker otherSpeaker = _speakers.First().Value;
+        float otherDistance = _speakerDistances[otherSpeaker.Id];
+
+        return otherSpeaker.Position + new Vector3(otherDistance, 0.0f, 0.0f);
+    }
+
+    private Vector3 GetAddedThirdSpeakerPosition()
+    {
+        // Third speaker can be on any arbitrary point on the circle
+        // where the distances to both other speakers is correct
+        (Speaker Speaker, float Distance)[] speakers = _speakers
+            .Take(2)
+            .Select(keyValuePair =>
+                (keyValuePair.Value, _speakerDistances[keyValuePair.Key])
+            ).ToArray();
+
+        // Direction vector from the second speaker to the first
+        Vector3 direction = speakers[1].Speaker.Position - speakers[0].Speaker.Position;
+        float twoSpeakerDistance = direction.Length();
+        direction = Vector3.Normalize(direction);
+
+        // Points on the distance spheres farthest away from the other speaker's position
+        Tuple<Vector3, Vector3> farPoints = new(
+            speakers[0].Speaker.Position + direction * speakers[0].Distance,
+            speakers[1].Speaker.Position - direction * speakers[1].Distance
+        );
+        // Points on the distance spheres closest to the other speaker's position
+        Tuple<Vector3, Vector3> nearPoints = new(
+            speakers[0].Speaker.Position - direction * speakers[0].Distance,
+            speakers[1].Speaker.Position + direction * speakers[1].Distance
+        );
+
+        if (twoSpeakerDistance > speakers[0].Distance + speakers[1].Distance)
+        {
+            // Two speakers' distance spheres are disjoint
+            // Place speaker on the connecting line at the right ratio
+            float distanceRatio = speakers[0].Distance / (speakers[0].Distance + speakers[1].Distance);
+            return nearPoints.Item1 * distanceRatio + nearPoints.Item2 * (1.0f - distanceRatio);
+        } else if (speakers[0].Distance > (speakers[0].Speaker.Position - farPoints.Item2).Length())
+        {
+            // Second speaker's distance sphere is inside the first's distance sphere
+            // Place speaker closest to both boundaries
+            return (nearPoints.Item1 + farPoints.Item2) / 2.0f;
+        } else if (speakers[1].Distance > (speakers[1].Speaker.Position - farPoints.Item1).Length())
+        {
+            // First speaker's distance sphere is inside the second's distance sphere
+            // Place speaker closest to both boundaries
+            return (nearPoints.Item2 + farPoints.Item1) / 2.0f;
+        } else
+        {
+            // Two distance spheres intersect
+            // Place speaker at an intersection point
+            float speaker1Angle = MathF.Atan(speakers[1].Distance / speakers[0].Distance);
+            Vector3 orthogonal = Vector3.Normalize(new(
+                direction.Y + direction.Z,
+                direction.Z - direction.X,
+                -direction.X - direction.Y
+            ));
+            return speakers[0].Speaker.Position +
+                direction * MathF.Sin(speaker1Angle) +
+                orthogonal * MathF.Cos(speaker1Angle);
+        }
+    }
+
+    private Vector3 GetAddedTrilateratedSpeakerPosition()
+    {
+        // Fourth speaker onward can be located with gradient descent
+        DistanceData[] distances = _speakerDistances
+            .Select(keyValue =>
+                new DistanceData() { SpeakerId = keyValue.Key, Distance = keyValue.Value }
+            ).ToArray();
+        return GetUserPosition(distances);
+    }
+
+
+    public void RemoveSpeaker(uint id)
+    {
+        if (!_speakers.ContainsKey(id))
+        {
+            _logger.LogWarning("Tried to remove speaker with unknown ID {ID}", id);
+        }
+
+        _speakers.Remove(id);
+        _speakerDistances.Remove(id);
     }
 
 
