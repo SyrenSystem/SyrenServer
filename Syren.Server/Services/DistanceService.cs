@@ -175,10 +175,10 @@ public class DistanceService : IDistanceService
         var spheres = distances
             .Where(distance => _speakers.ContainsKey(distance.SpeakerId))
             .GroupBy(distance => distance.SpeakerId)
-            .Select(speakerDistances => (
-                Center: _speakers[speakerDistances.Key].Position,
-                Radius: speakerDistances.Single().Distance
-            )).ToArray();
+            .Select(speakerDistances => new Sphere() {
+                Center = _speakers[speakerDistances.Key].Position,
+                Radius = speakerDistances.Single().Distance
+            }).ToArray();
 
         if (spheres.Length < 3)
         {
@@ -188,7 +188,7 @@ public class DistanceService : IDistanceService
         return PoorMansGradientDescent(_speakers.Values.Center(), vector => MeanSquaredError(vector, spheres));
     }
 
-    private static double MeanSquaredError(Vector3 position, (Vector3 Center, double Radius)[] spheres)
+    private static double MeanSquaredError(Vector3 position, Sphere[] spheres)
     {
         return spheres.Select(sphere =>
         {
