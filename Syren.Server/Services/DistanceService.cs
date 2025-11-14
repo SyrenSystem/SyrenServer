@@ -6,9 +6,9 @@ namespace Syren.Server.Services;
 
 public class DistanceService : IDistanceService
 {
-    private readonly Dictionary<uint, Speaker> _speakers = [];
-    private readonly Dictionary<uint, double> _speakerDistances = [];
-    private uint _maxSpeakerId = 0;
+    private readonly Dictionary<int, Speaker> _speakers = [];
+    private readonly Dictionary<int, double> _speakerDistances = [];
+    private int _maxSpeakerId = 0;
 
     private readonly ILogger<DistanceService> _logger;
 
@@ -40,7 +40,7 @@ public class DistanceService : IDistanceService
         _logger.LogTrace("Adding speaker with ID {speakerId}; new speaker count: {speakerCount}",
                             _maxSpeakerId, _speakers.Count);
 
-        uint id = _maxSpeakerId++;
+        int id = _maxSpeakerId++;
         Vector3 position = _speakers.Count switch
         {
             0 => GetAddedFirstSpeakerPosition(),
@@ -140,7 +140,7 @@ public class DistanceService : IDistanceService
     }
 
 
-    public void RemoveSpeaker(uint id)
+    public void RemoveSpeaker(int id)
     {
         _logger.LogTrace("Removing speaker {ID}", id);
 
