@@ -82,9 +82,8 @@ public class DistanceService : IDistanceService
             ).ToArray();
 
         // Direction vector from the second speaker to the first
-        Vector3 direction = speakers[1].Speaker.Position - speakers[0].Speaker.Position;
-        double twoSpeakerDistance = direction.Length();
-        direction = Vector3.Normalize(direction);
+        Vector3 direction = Vector3.Normalize(speakers[1].Speaker.Position - speakers[0].Speaker.Position);
+        float twoSpeakerDistance = Vector3.Distance(speakers[0].Speaker.Position, speakers[1].Speaker.Position);
 
         // Points on the distance spheres farthest away from the other speaker's position
         Tuple<Vector3, Vector3> farPoints = new(
@@ -101,8 +100,8 @@ public class DistanceService : IDistanceService
         {
             // Two speakers' distance spheres are disjoint
             // Place speaker on the connecting line at the right ratio
-            float distanceRatio = (float)(speakers[0].Distance / (speakers[0].Distance + speakers[1].Distance));
-            return nearPoints.Item1 * distanceRatio + nearPoints.Item2 * (1.0f - distanceRatio);
+            float distanceRatio = (float)(speakers[1].Distance / (speakers[0].Distance + speakers[1].Distance));
+            return Vector3.Lerp(nearPoints.Item1, nearPoints.Item2, distanceRatio);
         } else if (speakers[0].Distance > (speakers[0].Speaker.Position - farPoints.Item2).Length())
         {
             // Second speaker's distance sphere is inside the first's distance sphere
@@ -192,7 +191,7 @@ public class DistanceService : IDistanceService
     {
         return spheres.Select(sphere =>
         {
-            double distance = (sphere.Center - position).Length();
+            float distance = Vector3.Distance(sphere.Center, position);
             return Math.Pow(sphere.Radius - distance, 2.0);
         }).Sum() / spheres.Length;
     }
