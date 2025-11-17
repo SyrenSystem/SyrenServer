@@ -1,5 +1,4 @@
 using System.Numerics;
-using Syren.Server.Interfaces;
 using Syren.Server.Models;
 
 namespace Syren.Server.Services;

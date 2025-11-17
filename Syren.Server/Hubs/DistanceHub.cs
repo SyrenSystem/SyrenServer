@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
-using Syren.Server.Interfaces;
 using Syren.Server.Models;
+using Syren.Server.Services;
 
 namespace Syren.Server.Hubs;
 
