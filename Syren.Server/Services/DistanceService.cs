@@ -103,13 +103,13 @@ public class DistanceService : IDistanceService
 
         // Points on the distance spheres farthest away from the other speaker's position
         Tuple<Vector3, Vector3> farPoints = new(
-            speakers[0].Speaker.Position + direction * (float)speakers[0].Distance,
-            speakers[1].Speaker.Position - direction * (float)speakers[1].Distance
+            speakers[0].Speaker.Position - direction * (float)speakers[0].Distance,
+            speakers[1].Speaker.Position + direction * (float)speakers[1].Distance
         );
         // Points on the distance spheres closest to the other speaker's position
         Tuple<Vector3, Vector3> nearPoints = new(
-            speakers[0].Speaker.Position - direction * (float)speakers[0].Distance,
-            speakers[1].Speaker.Position + direction * (float)speakers[1].Distance
+            speakers[0].Speaker.Position + direction * (float)speakers[0].Distance,
+            speakers[1].Speaker.Position - direction * (float)speakers[1].Distance
         );
 
         if (twoSpeakerDistance > speakers[0].Distance + speakers[1].Distance)
@@ -117,7 +117,7 @@ public class DistanceService : IDistanceService
             // Two speakers' distance spheres are disjoint
             // Place speaker on the connecting line at the right ratio
             float distanceRatio = (float)(speakers[1].Distance / (speakers[0].Distance + speakers[1].Distance));
-            return Vector3.Lerp(nearPoints.Item1, nearPoints.Item2, distanceRatio);
+            return Vector3.Lerp(speakers[0].Speaker.Position, speakers[1].Speaker.Position, distanceRatio);
         } else if (speakers[0].Distance > (speakers[0].Speaker.Position - farPoints.Item2).Length())
         {
             // Second speaker's distance sphere is inside the first's distance sphere
@@ -132,15 +132,28 @@ public class DistanceService : IDistanceService
         {
             // Two distance spheres intersect
             // Place speaker at an intersection point
-            float speaker1Angle = MathF.Atan((float)(speakers[1].Distance / speakers[0].Distance));
+
+            // Law of cosines
+            float speaker1Angle = MathF.Acos(
+                (
+                    MathF.Pow((float)speakers[0].Distance, 2.0f) +
+                    MathF.Pow(twoSpeakerDistance, 2.0f) -
+                    MathF.Pow((float)speakers[1].Distance, 2.0f)
+                ) / (
+                    2.0f * (float)speakers[0].Distance * twoSpeakerDistance
+                )
+            );
+
             Vector3 orthogonal = Vector3.Normalize(new(
                 direction.Y + direction.Z,
                 direction.Z - direction.X,
                 -direction.X - direction.Y
             ));
             return speakers[0].Speaker.Position +
-                direction * MathF.Sin(speaker1Angle) +
-                orthogonal * MathF.Cos(speaker1Angle);
+                (float)speakers[0].Distance * (
+                    orthogonal * MathF.Sin(speaker1Angle) +
+                    direction * MathF.Cos(speaker1Angle)
+                );
         }
     }
 
