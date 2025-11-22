@@ -4,6 +4,8 @@ using MQTTnet;
 using Microsoft.Extensions.Options;
 using Syren.Server.Configuration;
 using Syren.Server.Services;
+using System.Text.Json;
+using Syren.Server.Models;
 
 namespace Syren.Server.Handlers;
 
@@ -35,12 +37,21 @@ public class AddSpeakerHandler : IMqttMessageHandler
         var payload = GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received speaker adding request:\n{Payload}\n", payload);
 
-        if (!String.IsNullOrEmpty(payload))
+        try
         {
-            _logger.LogWarning("Add speaker request from topic {Topic} came with a payload:\n{Payload}\n", Topic, payload);
-        }
+            var addSpeakerData = JsonSerializer.Deserialize<AddSpeakerData>(payload);
 
-        _distanceService.AddSpeaker();
+            _distanceService.AddSpeaker(addSpeakerData.Id);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex, "Failed to parse 'add speaker' data form topic {Topic}. Payload:\n{Payload}\n",
+                message.Topic, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling add speaker request from topic {Topic}", message.Topic);
+        }
 
         return Task.CompletedTask;
     }

@@ -37,6 +37,7 @@ public class UpdateDistancesHandler : IMqttMessageHandler
     {
         var payload = GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received sensor data:\n{Payload}\n", payload);
+        
         try
         {
             
@@ -49,12 +50,13 @@ public class UpdateDistancesHandler : IMqttMessageHandler
         catch (JsonException ex)
         {
             _logger.LogError(ex, "Failed to parse sensor data from topic {Topic}. Payload:\n{Payload}\n",
-            message.Topic, GetPayloadAsString(message.Payload));
+                message.Topic, payload);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error handling sensor data from topic {Topic}", message.Topic);
         }
+
         return Task.CompletedTask;
     }
 

@@ -4,7 +4,7 @@ namespace Syren.Server.Models;
 
 public struct Speaker
 {
-    public required int Id;
+    public required string Id;
     public required Vector3 Position;
 }
 
