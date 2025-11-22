@@ -30,7 +30,13 @@ public class DistanceService : IDistanceService
                 continue;
             }
 
-            _speakerDistances.Add(distanceData.SpeakerId, distanceData.Distance);
+            if (_speakerDistances.ContainsKey(distanceData.SpeakerId))
+            {
+                _speakerDistances[distanceData.SpeakerId] = distanceData.Distance;
+            } else
+            {
+                _speakerDistances.Add(distanceData.SpeakerId, distanceData.Distance);
+            }
         }
     }
 
