@@ -1,5 +1,4 @@
 using System.Numerics;
-using Syren.Server.Interfaces;
 using Syren.Server.Models;
 
 namespace Syren.Server.Services;
@@ -31,7 +30,13 @@ public class DistanceService : IDistanceService
                 continue;
             }
 
-            _speakerDistances.Add(distanceData.SpeakerId, distanceData.Distance);
+            if (_speakerDistances.ContainsKey(distanceData.SpeakerId))
+            {
+                _speakerDistances[distanceData.SpeakerId] = distanceData.Distance;
+            } else
+            {
+                _speakerDistances.Add(distanceData.SpeakerId, distanceData.Distance);
+            }
         }
     }
 
@@ -56,6 +61,13 @@ public class DistanceService : IDistanceService
         };
 
         _speakers.Add(speaker.Id, speaker);
+        UpdateDistances([new DistanceData{
+            SpeakerId = speaker.Id,
+            Distance = 0.0,
+        }]);
+
+        _logger.LogDebug("Added speaker with ID {speakerId} at position {position}",
+                            speaker.Id, speaker.Position);
         return speaker;
     }
 

@@ -1,7 +1,7 @@
 using System.Numerics;
 using Syren.Server.Models;
 
-namespace Syren.Server.Interfaces;
+namespace Syren.Server.Services;
 
 public interface IDistanceService
 {
