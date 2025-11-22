@@ -48,12 +48,17 @@ public class MqttOptions
     public int ReconnectDelaySeconds { get; set; } = 5;
 
     /// <summary>
-    /// Topic for receiving sensor data from SyrenApp
+    /// Topic for receiving sensor data from SyrenServer
     /// </summary>
-    public string UpdateDistancesTopic { get; set; } = "SyrenSystem/SyrenApp/UpdateDistances";
+    public string UpdateDistancesTopic { get; set; } = "SyrenSystem/SyrenServer/UpdateDistances";
 
     /// <summary>
-    /// Topic for adding speakers from SyrenApp
+    /// Topic for adding speakers from SyrenServer
     /// </summary>
-    public string AddSpeakerTopic { get; set; } = "SyrenSystem/SyrenApp/AddSpeaker";
+    public string AddSpeakerTopic { get; set; } = "SyrenSystem/SyrenServer/AddSpeaker";
+
+    /// <summary>
+    /// Topic for removing speakers from SyrenServer
+    /// </summary>
+    public string RemoveSpeakerTopic { get; set; } = "SyrenSystem/SyrenServer/RemoveSpeaker";
 }

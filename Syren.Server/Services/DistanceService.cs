@@ -175,6 +175,7 @@ public class DistanceService : IDistanceService
         if (!_speakers.ContainsKey(id))
         {
             _logger.LogWarning("Tried to remove speaker with unknown ID {ID}", id);
+            return;
         }
 
         _speakers.Remove(id);
