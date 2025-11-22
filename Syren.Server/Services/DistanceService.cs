@@ -61,6 +61,13 @@ public class DistanceService : IDistanceService
         };
 
         _speakers.Add(speaker.Id, speaker);
+        UpdateDistances([new DistanceData{
+            SpeakerId = speaker.Id,
+            Distance = 0.0,
+        }]);
+
+        _logger.LogDebug("Added speaker with ID {speakerId} at position {position}",
+                            speaker.Id, speaker.Position);
         return speaker;
     }
 
