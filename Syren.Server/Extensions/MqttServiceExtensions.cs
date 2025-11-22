@@ -17,8 +17,9 @@ public static class MqttServiceExtensions
         // Register MQTT client service
         services.AddSingleton<IMqttClientService, MqttClientService>();
 
-        // Register sensor data handler
+        // Register handlers
         services.AddSingleton<IMqttMessageHandler, SensorDataHandler>();
+        services.AddSingleton<IMqttMessageHandler, AddSpeakerHandler>();
 
         // Register hosted service for MQTT lifecycle management
         services.AddHostedService<MqttHostedService>();

@@ -50,5 +50,10 @@ public class MqttOptions
     /// <summary>
     /// Topic for receiving sensor data from SyrenApp
     /// </summary>
-    public string SensorDataTopic { get; set; } = "SyrenSystem/SyrenApp/sensorData";
+    public string SensorDataTopic { get; set; } = "SyrenSystem/SyrenApp/SensorData";
+
+    /// <summary>
+    /// Topic for adding speakers from SyrenApp
+    /// </summary>
+    public string AddSpeakerTopic { get; set; } = "SyrenSystem/SyrenApp/AddSpeaker";
 }
