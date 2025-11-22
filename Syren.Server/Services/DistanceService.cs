@@ -213,15 +213,15 @@ public class DistanceService : IDistanceService
             throw new ArgumentException($"Tried to calculate user position using {spheres.Length} < 3 data points.");
         }
 
-        return PoorMansGradientDescent(_speakers.Values.Center(), vector => MeanSquaredError(vector, spheres));
+        return PoorMansGradientDescent(_speakers.Values.Center(), vector => MeanAbsError(vector, spheres));
     }
 
-    private static double MeanSquaredError(Vector3 position, Sphere[] spheres)
+    private static double MeanAbsError(Vector3 position, Sphere[] spheres)
     {
         return spheres.Select(sphere =>
         {
             float distance = Vector3.Distance(sphere.Center, position);
-            return Math.Pow(sphere.Radius - distance, 2.0);
+            return Math.Abs(sphere.Radius - distance);
         }).Sum() / spheres.Length;
     }
 
@@ -229,22 +229,40 @@ public class DistanceService : IDistanceService
     {
         Vector3 result = initialValue;
         double errorVal = errorFunc(result);
+        float eta = (float)errorVal;
 
-        const double threshold = 0.3f;
-        const uint maxIterations = 10;
+        const double threshold = 0.1f;
+        const uint maxIterations = 100;
 
         // Poor man's gradient descent
-        for (uint i = 0; i < maxIterations; i++)
+        for (uint iterationCt = 0; iterationCt < maxIterations; iterationCt++)
         {
-            if (errorVal <= threshold) return result;
+            if (errorVal <= threshold) {
+                _logger.LogInformation(@"User position {Position} has error value {Error:0.00} <= {Threshold:0.00}
+                    in {IterationCt} iterations", result, errorVal, threshold, iterationCt);
+                return result;
+            }
 
-            (result, errorVal) = _directions
-                .Select(direction => result + direction * (float)errorVal)
+            (var newResult, var newErrorVal) = _directions
+                .Select(gradient => result + gradient * eta)
                 .Select(position => (position, errorFunc(position)))
                 .MinBy<(Vector3 Position, double ErrorVal), double>(tuple => tuple.ErrorVal);
+            
+            if (newErrorVal < errorVal)
+            {
+                // New value is better; keep going with the new value
+                result = newResult;
+                errorVal = newErrorVal;
+                eta = (float)errorVal;
+            } else
+            {
+                // We overshot; reduce eta
+                eta /= 2.0f;
+            }
         }
 
-        _logger.LogWarning("User position {Position} has error value of {Error:0.00} > {Threshold:0.00}", result, errorVal, threshold);
+        _logger.LogWarning(@"User position {Position} has error value of {Error:0.00} > {Threshold:0.00}
+            in {IterationCt} iterations", result, errorVal, threshold, maxIterations);
 
         return result;
     }
