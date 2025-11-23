@@ -5,8 +5,7 @@ namespace Syren.Server.Services;
 
 public class DistanceService : IDistanceService
 {
-    private readonly Dictionary<string, Speaker> _speakers = [];
-    private readonly Dictionary<string, double> _speakerDistances = [];
+    private readonly Dictionary<string, SpeakerState> _speakers = [];
 
     private readonly ILogger<DistanceService> _logger;
 
@@ -29,7 +28,7 @@ public class DistanceService : IDistanceService
                 continue;
             }
 
-            _speakerDistances[distanceData.SpeakerId] = distanceData.Distance;
+            _speakers[distanceData.SpeakerId].Distance = distanceData.Distance;
         }
     }
 
@@ -41,7 +40,7 @@ public class DistanceService : IDistanceService
         if (_speakers.ContainsKey(id))
         {
             _logger.LogWarning("Tried to add existing speaker \"{Id}\"", id);
-            return _speakers[id];
+            return _speakers[id].Speaker;
         }
 
         Vector3 position = _speakers.Count switch
@@ -58,11 +57,7 @@ public class DistanceService : IDistanceService
             Position = position,
         };
 
-        _speakers.Add(speaker.Id, speaker);
-        UpdateDistances([new DistanceData{
-            SpeakerId = speaker.Id,
-            Distance = 0.0,
-        }]);
+        _speakers.Add(speaker.Id, new SpeakerState{Speaker = speaker, Distance = 0.0});
 
         _logger.LogDebug("Added speaker with ID {speakerId} at position {position}",
                             speaker.Id, speaker.Position);
@@ -75,21 +70,19 @@ public class DistanceService : IDistanceService
     {
         // Second speaker can be on any arbitrary point on the sphere
         // around the first at the distance between the two
-        Speaker otherSpeaker = _speakers.First().Value;
-        double otherDistance = _speakerDistances[otherSpeaker.Id];
+        SpeakerState otherSpeaker = _speakers.First().Value;
 
-        return otherSpeaker.Position + new Vector3((float)otherDistance, 0.0f, 0.0f);
+        return otherSpeaker.Speaker.Position + new Vector3((float)otherSpeaker.Distance, 0.0f, 0.0f);
     }
 
     private Vector3 GetAddedThirdSpeakerPosition()
     {
         // Third speaker can be on any arbitrary point on the circle
         // where the distances to both other speakers is correct
-        (Speaker Speaker, double Distance)[] speakers = _speakers
+        SpeakerState[] speakers = _speakers
+            .Values
             .Take(2)
-            .Select(keyValuePair =>
-                (keyValuePair.Value, _speakerDistances[keyValuePair.Key])
-            ).ToArray();
+            .ToArray();
 
         // Direction vector from the second speaker to the first
         Vector3 direction = Vector3.Normalize(speakers[1].Speaker.Position - speakers[0].Speaker.Position);
@@ -154,9 +147,9 @@ public class DistanceService : IDistanceService
     private Vector3 GetAddedTrilateratedSpeakerPosition()
     {
         // Fourth speaker onward can be located with gradient descent
-        DistanceData[] distances = _speakerDistances
+        DistanceData[] distances = _speakers
             .Select(keyValue =>
-                new DistanceData() { SpeakerId = keyValue.Key, Distance = keyValue.Value }
+                new DistanceData() { SpeakerId = keyValue.Key, Distance = keyValue.Value.Distance }
             ).ToArray();
         return GetUserPosition(distances);
     }
@@ -173,7 +166,6 @@ public class DistanceService : IDistanceService
         }
 
         _speakers.Remove(id);
-        _speakerDistances.Remove(id);
     }
 
 
@@ -199,7 +191,7 @@ public class DistanceService : IDistanceService
             .Where(distance => _speakers.ContainsKey(distance.SpeakerId))
             .GroupBy(distance => distance.SpeakerId)
             .Select(speakerDistances => new Sphere() {
-                Center = _speakers[speakerDistances.Key].Position,
+                Center = _speakers[speakerDistances.Key].Speaker.Position,
                 Radius = speakerDistances.Single().Distance
             }).ToArray();
 
@@ -208,7 +200,12 @@ public class DistanceService : IDistanceService
             throw new ArgumentException($"Tried to calculate user position using {spheres.Length} < 3 data points.");
         }
 
-        return PoorMansGradientDescent(_speakers.Values.Center(), vector => MeanAbsError(vector, spheres));
+        Vector3 center = _speakers
+            .Values
+            .Select(state => state.Speaker)
+            .ToList()
+            .Center();
+        return PoorMansGradientDescent(center, vector => MeanAbsError(vector, spheres));
     }
 
     private static double MeanAbsError(Vector3 position, Sphere[] spheres)
@@ -261,4 +258,10 @@ public class DistanceService : IDistanceService
 
         return result;
     }
+}
+
+public sealed record SpeakerState
+{
+    public Speaker Speaker;
+    public double Distance;
 }
