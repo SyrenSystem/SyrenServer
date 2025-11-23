@@ -103,9 +103,8 @@ public class DistanceService : IDistanceService
         if (twoSpeakerDistance > speakers[0].Distance + speakers[1].Distance)
         {
             // Two speakers' distance spheres are disjoint
-            // Place speaker on the connecting line at the right ratio
-            float distanceRatio = (float)(speakers[1].Distance / (speakers[0].Distance + speakers[1].Distance));
-            return Vector3.Lerp(speakers[0].Speaker.Position, speakers[1].Speaker.Position, distanceRatio);
+            // Place speaker halfway between the two circles' perimeters
+            return (extrema[0].Near + extrema[1].Near) / 2.0f;
         } else if (speakers[0].Distance > (speakers[0].Speaker.Position - extrema[1].Far).Length())
         {
             // Second speaker's distance sphere is inside the first's distance sphere
