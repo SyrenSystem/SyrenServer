@@ -88,16 +88,17 @@ public class DistanceService : IDistanceService
         Vector3 direction = Vector3.Normalize(speakers[1].Speaker.Position - speakers[0].Speaker.Position);
         float twoSpeakerDistance = Vector3.Distance(speakers[0].Speaker.Position, speakers[1].Speaker.Position);
 
-        // Points on the distance spheres farthest away from the other speaker's position
-        Tuple<Vector3, Vector3> farPoints = new(
-            speakers[0].Speaker.Position - direction * (float)speakers[0].Distance,
-            speakers[1].Speaker.Position + direction * (float)speakers[1].Distance
-        );
-        // Points on the distance spheres closest to the other speaker's position
-        Tuple<Vector3, Vector3> nearPoints = new(
-            speakers[0].Speaker.Position + direction * (float)speakers[0].Distance,
-            speakers[1].Speaker.Position - direction * (float)speakers[1].Distance
-        );
+        // Points on the distance spheres closest and farthest away from the other speaker's position
+        (Vector3 Near, Vector3 Far)[] extrema = [
+            (
+                speakers[0].Speaker.Position + direction * (float)speakers[0].Distance,
+                speakers[0].Speaker.Position - direction * (float)speakers[0].Distance
+            ),
+            (
+                speakers[1].Speaker.Position - direction * (float)speakers[1].Distance,
+                speakers[1].Speaker.Position + direction * (float)speakers[1].Distance
+            )
+        ];
 
         if (twoSpeakerDistance > speakers[0].Distance + speakers[1].Distance)
         {
@@ -105,16 +106,16 @@ public class DistanceService : IDistanceService
             // Place speaker on the connecting line at the right ratio
             float distanceRatio = (float)(speakers[1].Distance / (speakers[0].Distance + speakers[1].Distance));
             return Vector3.Lerp(speakers[0].Speaker.Position, speakers[1].Speaker.Position, distanceRatio);
-        } else if (speakers[0].Distance > (speakers[0].Speaker.Position - farPoints.Item2).Length())
+        } else if (speakers[0].Distance > (speakers[0].Speaker.Position - extrema[1].Far).Length())
         {
             // Second speaker's distance sphere is inside the first's distance sphere
             // Place speaker closest to both boundaries
-            return (nearPoints.Item1 + farPoints.Item2) / 2.0f;
-        } else if (speakers[1].Distance > (speakers[1].Speaker.Position - farPoints.Item1).Length())
+            return (extrema[0].Near + extrema[1].Far) / 2.0f;
+        } else if (speakers[1].Distance > (speakers[1].Speaker.Position - extrema[0].Far).Length())
         {
             // First speaker's distance sphere is inside the second's distance sphere
             // Place speaker closest to both boundaries
-            return (nearPoints.Item2 + farPoints.Item1) / 2.0f;
+            return (extrema[1].Near + extrema[0].Far) / 2.0f;
         } else
         {
             // Two distance spheres intersect
