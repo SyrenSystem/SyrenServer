@@ -7,10 +7,14 @@ public class DistanceService : IDistanceService
 {
     private readonly Dictionary<string, SpeakerState> _speakers = [];
 
+    private readonly ISnapCastService _snapCastService;
     private readonly ILogger<DistanceService> _logger;
 
-    public DistanceService(ILogger<DistanceService> logger)
+    public DistanceService(
+        ISnapCastService snapCastService,
+        ILogger<DistanceService> logger)
     {
+        _snapCastService = snapCastService;
         _logger = logger;
     }
 
@@ -50,6 +54,8 @@ public class DistanceService : IDistanceService
             2 => GetAddedThirdSpeakerPosition(),
             _ => GetAddedTrilateratedSpeakerPosition(),
         };
+
+        _snapCastService.GetStatusAsync();
 
         Speaker speaker = new()
         {

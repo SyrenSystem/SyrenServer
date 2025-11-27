@@ -5,6 +5,7 @@ var builder = WebApplication.CreateBuilder();
 
 builder.Services.AddLogging(options => options.AddConsole());
 builder.Services.AddSingleton<IDistanceService, DistanceService>();
+builder.Services.AddSnapCastServices(builder.Configuration);
 builder.Services.AddMqttServices(builder.Configuration);
 
 var app = builder.Build();
