@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using MQTTnet;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Syren.Server.Configuration;
 using Syren.Server.Models;
@@ -12,7 +11,7 @@ namespace Syren.Server.Handlers;
 
 /// <summary>
 /// Handler for sensor data messages from SyrenApp
-/// Topic: SyrenSystem/SyrenApp/UpdateDistances
+/// Topic: SyrenSystem/SyrenServer/UpdateDistances
 /// </summary>
 public class UpdateDistancesHandler : IMqttMessageHandler
 {
@@ -44,7 +43,7 @@ public class UpdateDistancesHandler : IMqttMessageHandler
             var sensorDataArray = JsonSerializer.Deserialize<DistancesData>(payload);
             if (sensorDataArray.Distances != null)
             {
-                _distanceService.UpdateDistances(sensorDataArray.Distances);
+                _distanceService.UpdateDistancesAsync(sensorDataArray.Distances);
             }
         }
         catch (JsonException ex)

@@ -53,6 +53,11 @@ public class MqttOptions
     public string UpdateDistancesTopic { get; set; } = "SyrenSystem/SyrenServer/UpdateDistances";
 
     /// <summary>
+    /// Topic for setting speaker volumes
+    /// </summary>
+    public string SetSpeakerVolumeTopic { get; set; } = "SyrenSystem/SyrenServer/SetSpeakerVolume";
+
+    /// <summary>
     /// Topic for adding speakers from SyrenServer
     /// </summary>
     public string ConnectSpeakerTopic { get; set; } = "SyrenSystem/SyrenServer/ConnectSpeaker";

@@ -19,6 +19,7 @@ public static class MqttServiceExtensions
 
         // Register handlers
         services.AddSingleton<IMqttMessageHandler, UpdateDistancesHandler>();
+        services.AddSingleton<IMqttMessageHandler, SetSpeakerVolumeHandler>();
         services.AddSingleton<IMqttMessageHandler, ConnectSpeakerHandler>();
         services.AddSingleton<IMqttMessageHandler, DisconnectSpeakerHandler>();
 
