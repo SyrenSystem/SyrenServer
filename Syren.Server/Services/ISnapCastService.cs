@@ -9,4 +9,6 @@ public interface ISnapCastService
 {
     Task<Status?> GetStatusAsync();
     Task SetVolumeAsync(int percent, bool muted = false);
+
+    Task<double?> GetClientVolume(string id);
 }

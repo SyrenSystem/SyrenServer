@@ -55,10 +55,10 @@ public class MqttOptions
     /// <summary>
     /// Topic for adding speakers from SyrenServer
     /// </summary>
-    public string AddSpeakerTopic { get; set; } = "SyrenSystem/SyrenServer/AddSpeaker";
+    public string ConnectSpeakerTopic { get; set; } = "SyrenSystem/SyrenServer/ConnectSpeaker";
 
     /// <summary>
     /// Topic for removing speakers from SyrenServer
     /// </summary>
-    public string RemoveSpeakerTopic { get; set; } = "SyrenSystem/SyrenServer/RemoveSpeaker";
+    public string DisconnectSpeakerTopic { get; set; } = "SyrenSystem/SyrenServer/DisconnectSpeaker";
 }

@@ -11,46 +11,46 @@ namespace Syren.Server.Handlers;
 
 /// <summary>
 /// Handler for sensor data messages from SyrenApp
-/// Topic: SyrenSystem/SyrenApp/AddSpeaker
+/// Topic: SyrenSystem/SyrenApp/DisconnectSpeaker
 /// </summary>
-public class AddSpeakerHandler : IMqttMessageHandler
+public class DisconnectSpeakerHandler : IMqttMessageHandler
 {
     private readonly IDistanceService _distanceService;
     private readonly MqttOptions _mqttOptions;
-    private readonly ILogger<AddSpeakerHandler> _logger;
+    private readonly ILogger<DisconnectSpeakerHandler> _logger;
 
     public string Topic { get; }
 
-    public AddSpeakerHandler(
+    public DisconnectSpeakerHandler(
         IDistanceService distanceService,
         IOptions<MqttOptions> mqttOptions,
-        ILogger<AddSpeakerHandler> logger)
+        ILogger<DisconnectSpeakerHandler> logger)
     {
         _distanceService = distanceService;
         _mqttOptions = mqttOptions.Value;
         _logger = logger;
-        Topic = _mqttOptions.AddSpeakerTopic;
+        Topic = _mqttOptions.DisconnectSpeakerTopic;
     }
 
     public Task HandleMessageAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)
     {
         var payload = GetPayloadAsString(message.Payload);
-        _logger.LogDebug("Received speaker adding request:\n{Payload}\n", payload);
+        _logger.LogDebug("Received speaker removal request:\n{Payload}\n", payload);
 
         try
         {
-            var addSpeakerData = JsonSerializer.Deserialize<AddSpeakerData>(payload);
+            var disconnectSpeakerData = JsonSerializer.Deserialize<DisconnectSpeakerData>(payload);
 
-            _distanceService.AddSpeaker(addSpeakerData.Id);
+            _distanceService.DisconnectSpeaker(disconnectSpeakerData.sensorId);
         }
         catch (JsonException ex)
         {
-            _logger.LogError(ex, "Failed to parse 'add speaker' data from topic {Topic}. Payload:\n{Payload}\n",
+            _logger.LogError(ex, "Failed to parse 'disconnect speaker' data from topic {Topic}. Payload:\n{Payload}\n",
                 message.Topic, payload);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error handling add speaker request from topic {Topic}", message.Topic);
+            _logger.LogError(ex, "Error handling disconnect speaker request from topic {Topic}", message.Topic);
         }
 
         return Task.CompletedTask;

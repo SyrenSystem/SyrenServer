@@ -73,4 +73,17 @@ public class SnapCastService : ISnapCastService
 
         return;
     }
+
+    public async Task<double?> GetClientVolume(string id)
+    {
+        var snapStatus = await GetStatusAsync();
+        if (!snapStatus.HasValue) return null;
+
+        var client = snapStatus.Value.Result.SystemStatus.Clients()
+            .Select(client => (ClientStatus?)client)
+            .FirstOrDefault(client => client?.Id == id, null);
+
+        return client.HasValue && !client.Value.Config.Volume.Muted ?
+            client.Value.Config.Volume.Percentage / 100.0 : 0.0;
+    }
 }

@@ -41,4 +41,6 @@ public readonly struct SystemStatus
 
     [JsonPropertyName("streams")]
     public required StreamStatus[] Streams { get; init; }
+
+    public ClientStatus[] Clients() => Groups.SelectMany(group => group.Clients).ToArray();
 }
