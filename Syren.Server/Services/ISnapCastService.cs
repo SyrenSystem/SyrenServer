@@ -7,8 +7,8 @@ namespace Syren.Server.Services;
 /// </summary>
 public interface ISnapCastService
 {
-    Task<Status?> GetStatusAsync();
-    Task SetVolumeAsync(int percent, bool muted = false);
+    public Task<Status?> GetStatusAsync();
+    public Task SetClientVolumeAsync(string id, int percent);
 
-    Task<double?> GetClientVolume(string id);
+    public Task<double?> GetClientVolume(string id);
 }

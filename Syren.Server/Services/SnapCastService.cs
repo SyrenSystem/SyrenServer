@@ -50,24 +50,34 @@ public class SnapCastService : ISnapCastService
         return await response.Content.ReadFromJsonAsync<Status>();
     }
 
-    public async Task SetVolumeAsync(int percent, bool muted)
+    public async Task SetClientVolumeAsync(string id, int percent)
     {
-        _logger.LogTrace("Setting SnapCast volume to {Percent}%; muting: {Muted}", percent, muted);
+        _logger.LogTrace("Setting SnapClient \"{Id}\" volume to {Percent}%", id, percent);
 
-        StringContent jsonContent = new(
-            JsonSerializer.Serialize(new
-            {
-                muted = muted,
-                percent = percent,
-            }),
-            Encoding.UTF8,
-            "application/json"
-        );
-
-        HttpResponseMessage response = await _httpClient.PostAsync(
+        HttpResponseMessage response = await _httpClient.PostAsJsonAsync(
             "jsonrpc",
-            jsonContent
+            new SetVolumeRequest
+            {
+                Id = "1",
+                JsonRpcVersion = "2.0",
+                Method = "Client.SetVolume",
+                Params = new SetVolumeRequestParams
+                {
+                    Id = id,
+                    Volume = new Volume
+                    {
+                        Muted = percent == 0,
+                        Percentage = percent,
+                    },
+                },
+            }
         );
+
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogError("Failed to set SnapClient \"{Id}\" volume to {Percent}%", id, percent);
+            return;
+        }
 
         _logger.LogInformation(await response.Content.ReadAsStringAsync());
 
