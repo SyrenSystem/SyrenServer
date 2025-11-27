@@ -28,16 +28,29 @@ public class DistanceService : IDistanceService
                     {
                         SensorId = info.SensorId,
                         SnapClientId = info.SnapClientId,
+                        FullVolumeDistance = info.FullVolumeDistance,
+                        MuteDistance = info.MuteDistance,
                     })
                 )
             .ToDictionary();
+
+        _logger.LogInformation("Setting all SnapClient volumes to 0");
+        Task.WaitAll(
+            _speakers.Values
+                .Select
+                (
+                    speaker =>
+                    _snapCastService.SetClientVolumeAsync(speaker.SnapClientId, 0)
+                )
+        );
     }
 
 
-    public void UpdateDistances(IReadOnlyCollection<DistanceData> distances)
+    public async Task UpdateDistances(IReadOnlyCollection<DistanceData> distances)
     {
         _logger.LogTrace("Updating {distanceCount} distances", distances.Count);
 
+        List<Task> tasks = [];
         foreach (DistanceData distanceData in distances)
         {
             if (!_speakers.ContainsKey(distanceData.SpeakerId))
@@ -47,8 +60,15 @@ public class DistanceService : IDistanceService
                 continue;
             }
 
-            _speakerStates[distanceData.SpeakerId].Distance = distanceData.Distance;
+            SpeakerState state = _speakerStates[distanceData.SpeakerId];
+            state.Distance = distanceData.Distance;
+
+            double distanceVolumeModifier = GetDistanceVolumeModifier(distanceData.SpeakerId, distanceData.Distance);
+            double volume = state.Volume * distanceVolumeModifier;
+            tasks.Add(_snapCastService.SetClientVolumeAsync(state.Speaker.SnapClientId, (int)(volume * 100.0)));
         }
+
+        Task.WaitAll(tasks);
     }
 
     public async Task<SpeakerState?> ConnectSpeakerAsync(string sensorId)
@@ -87,6 +107,7 @@ public class DistanceService : IDistanceService
         };
 
         _speakerStates.Add(sensorId, speakerState);
+        await _snapCastService.SetClientVolumeAsync(_speakers[sensorId].SnapClientId, (int)(speakerState.Volume * 100));
 
         _logger.LogDebug("Connected speaker with ID {speakerId} at position {position}",
                             sensorId, speakerState.Position);
@@ -184,7 +205,7 @@ public class DistanceService : IDistanceService
     }
 
 
-    public void DisconnectSpeaker(string sensorId)
+    public async Task DisconnectSpeaker(string sensorId)
     {
         _logger.LogTrace("Disconnecting speaker {ID}", sensorId);
 
@@ -194,6 +215,7 @@ public class DistanceService : IDistanceService
             return;
         }
 
+        await _snapCastService.SetClientVolumeAsync(_speakers[sensorId].SnapClientId, 0);
         _speakerStates.Remove(sensorId);
     }
 
@@ -282,5 +304,14 @@ public class DistanceService : IDistanceService
             in {IterationCt} iterations", result, errorVal, threshold, maxIterations);
 
         return result;
+    }
+
+    private double GetDistanceVolumeModifier(string speakerSensorId, double distance)
+    {
+        double muteDistance = _speakers[speakerSensorId].MuteDistance;
+        double fullVolumeDistance = _speakers[speakerSensorId].FullVolumeDistance;
+        distance = Math.Clamp(distance, fullVolumeDistance, muteDistance);
+
+        return 1.0 - (distance - fullVolumeDistance) / (muteDistance - fullVolumeDistance);
     }
 }
