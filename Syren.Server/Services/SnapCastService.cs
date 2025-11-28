@@ -13,15 +13,14 @@ public class SnapCastService : ISnapCastService
 
     public SnapCastService(
         IOptions<SnapCastOptions> options,
-        ILogger<SnapCastService> logger)
+        ILogger<SnapCastService> logger,
+        HttpClient httpClient)
     {
         _options = options.Value;
         _logger = logger; 
 
-        _httpClient = new()
-        {
-            BaseAddress = new Uri($"http://{_options.ServerHost}:{_options.HttpPort}"),
-        };
+        _httpClient = httpClient;
+        _httpClient.BaseAddress = new Uri($"http://{_options.ServerHost}:{_options.HttpPort}");
     }
 
     public async Task<SystemStatus?> GetStatusAsync()
