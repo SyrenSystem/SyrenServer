@@ -4,8 +4,10 @@ using Syren.Server.Services;
 var builder = WebApplication.CreateBuilder();
 
 builder.Services.AddLogging(options => options.AddConsole());
-builder.Services.AddSingleton<IDistanceService, DistanceService>();
+builder.Services.AddHttpClient();
+builder.Services.AddSnapCastServices(builder.Configuration);
 builder.Services.AddMqttServices(builder.Configuration);
+builder.Services.AddDistanceServices(builder.Configuration);
 
 var app = builder.Build();
 

@@ -50,15 +50,25 @@ public class MqttOptions
     /// <summary>
     /// Topic for receiving sensor data from SyrenServer
     /// </summary>
-    public string UpdateDistancesTopic { get; set; } = "SyrenSystem/SyrenServer/UpdateDistances";
+    public string UpdateDistanceTopic { get; set; } = "SyrenSystem/SyrenApp/UpdateDistance";
+
+    /// <summary>
+    /// Topic for receiving multiple sensor data from SyrenServer
+    /// </summary>
+    public string UpdateDistancesTopic { get; set; } = "SyrenSystem/SyrenApp/UpdateDistances";
+
+    /// <summary>
+    /// Topic for setting speaker volumes
+    /// </summary>
+    public string SetSpeakerVolumeTopic { get; set; } = "SyrenSystem/SyrenApp/SetSpeakerVolume";
 
     /// <summary>
     /// Topic for adding speakers from SyrenServer
     /// </summary>
-    public string AddSpeakerTopic { get; set; } = "SyrenSystem/SyrenServer/AddSpeaker";
+    public string ConnectSpeakerTopic { get; set; } = "SyrenSystem/SyrenApp/ConnectSpeaker";
 
     /// <summary>
     /// Topic for removing speakers from SyrenServer
     /// </summary>
-    public string RemoveSpeakerTopic { get; set; } = "SyrenSystem/SyrenServer/RemoveSpeaker";
+    public string DisconnectSpeakerTopic { get; set; } = "SyrenSystem/SyrenApp/DisconnectSpeaker";
 }

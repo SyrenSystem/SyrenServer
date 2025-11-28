@@ -5,9 +5,12 @@ namespace Syren.Server.Services;
 
 public interface IDistanceService
 {
-    public void UpdateDistances(IReadOnlyCollection<DistanceData> distances);
-    public Speaker AddSpeaker(string id);
-    public void RemoveSpeaker(string id);
+    public Task UpdateDistanceAsync(DistanceData distance);
+    public Task UpdateDistancesAsync(IReadOnlyCollection<DistanceData> distances);
+    public Task SetSpeakerVolumeAsync(string sensorId, double volume);
+
+    public Task<SpeakerState?> ConnectSpeakerAsync(string sensorId);
+    public Task DisconnectSpeakerAsync(string sensorId);
 
     public Vector3 GetUserPosition(IReadOnlyCollection<DistanceData> distances);
 }
