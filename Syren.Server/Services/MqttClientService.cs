@@ -40,6 +40,8 @@ public class MqttClientService : IMqttClientService, IAsyncDisposable
 
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
+        _logger.LogTrace("Connecting to MQTT broker");
+
         try
         {
             var optionsBuilder = new MqttClientOptionsBuilder()
@@ -86,6 +88,8 @@ public class MqttClientService : IMqttClientService, IAsyncDisposable
 
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
+        _logger.LogTrace("Disconnecting from MQTT broker");
+
         try
         {
             if (_mqttClient.IsConnected)
@@ -105,6 +109,8 @@ public class MqttClientService : IMqttClientService, IAsyncDisposable
 
     public async Task PublishAsync<T>(string topic, T message, CancellationToken cancellationToken = default)
     {
+        _logger.LogTrace("Publishing to MQTT topic \"{Topic}\" message \"{Message}\"", topic, message);
+
         try
         {
             if (!IsConnected)
@@ -136,6 +142,8 @@ public class MqttClientService : IMqttClientService, IAsyncDisposable
 
     private async Task SubscribeToTopicsAsync(CancellationToken cancellationToken)
     {
+        _logger.LogTrace("Subscribing to MQTT topics");
+
         var subscribeOptionsBuilder = new MqttClientSubscribeOptionsBuilder();
 
         foreach (var handler in _handlers)

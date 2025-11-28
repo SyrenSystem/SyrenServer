@@ -146,6 +146,8 @@ public class DistanceService : IDistanceService
 
     private Vector3 GetAddedSecondSpeakerPosition()
     {
+        _logger.LogTrace("Computing second speaker position");
+
         // Second speaker can be on any arbitrary point on the sphere
         // around the first at the distance between the two
         SpeakerState otherSpeaker = _speakerStates.First().Value;
@@ -155,6 +157,8 @@ public class DistanceService : IDistanceService
 
     private Vector3 GetAddedThirdSpeakerPosition()
     {
+        _logger.LogTrace("Computing third speaker position");
+
         // Third speaker can be on any arbitrary point on the circle
         // where the distances to both other speakers is correct
         SpeakerState[] speakers = _speakerStates
@@ -224,6 +228,8 @@ public class DistanceService : IDistanceService
 
     private Vector3 GetAddedTrilateratedSpeakerPosition()
     {
+        _logger.LogTrace("Computing >= 4th speaker position");
+
         // Fourth speaker onward can be located with gradient descent
         DistanceData[] distances = _speakerStates
             .Select(keyValue =>

@@ -95,6 +95,8 @@ public class SnapCastService : ISnapCastService
 
     public async Task<double?> GetClientVolume(string id)
     {
+        _logger.LogTrace("Getting SnapClient volumes");
+
         var snapStatus = await GetStatusAsync();
         if (!snapStatus.HasValue) return null;
 
