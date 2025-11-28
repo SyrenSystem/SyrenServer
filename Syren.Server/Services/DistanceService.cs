@@ -53,31 +53,34 @@ public class DistanceService : IDistanceService
         );
     }
 
+    public async Task UpdateDistanceAsync(DistanceData distance)
+    {
+        _logger.LogTrace("Updating speaker \"{Id}\" distance to {Distance}", distance.SpeakerId, distance.Distance);
+
+        if (!_speakers.ContainsKey(distance.SpeakerId))
+        {
+            _logger.LogError("Tried to update distance of unknown speaker with ID {ID}",
+                            distance.SpeakerId);
+            return;
+        }
+
+        SpeakerState state = _speakerStates[distance.SpeakerId];
+        state.Distance = distance.Distance;
+
+        double distanceVolumeModifier = GetDistanceVolumeModifier(distance.SpeakerId, distance.Distance);
+        double volume = state.Volume * distanceVolumeModifier;
+        _logger.LogInformation("DistanceVolumeModifier: {DistanceVolumeModifier}; Volume: {Volume}", distanceVolumeModifier, volume);
+
+        await _snapCastService.SetClientVolumeAsync(state.Speaker.SnapClientId, (int)(volume * 100.0));
+    }
 
     public async Task UpdateDistancesAsync(IReadOnlyCollection<DistanceData> distances)
     {
         _logger.LogTrace("Updating {distanceCount} distances", distances.Count);
 
-        List<Task> tasks = [];
-        foreach (DistanceData distanceData in distances)
-        {
-            if (!_speakers.ContainsKey(distanceData.SpeakerId))
-            {
-                _logger.LogError("Tried to update distance of unknown speaker with ID {ID}",
-                                distanceData.SpeakerId);
-                continue;
-            }
-
-            SpeakerState state = _speakerStates[distanceData.SpeakerId];
-            state.Distance = distanceData.Distance;
-
-            double distanceVolumeModifier = GetDistanceVolumeModifier(distanceData.SpeakerId, distanceData.Distance);
-            double volume = state.Volume * distanceVolumeModifier;
-            _logger.LogInformation("DistanceVolumeModifier: {DistanceVolumeModifier}; Volume: {Volume}", distanceVolumeModifier, volume);
-            tasks.Add(_snapCastService.SetClientVolumeAsync(state.Speaker.SnapClientId, (int)(volume * 100.0)));
-        }
-
-        Task.WaitAll(tasks);
+        Task.WaitAll(distances.Select(
+                distanceData => UpdateDistanceAsync(distanceData)
+            ));
     }
 
     public async Task SetSpeakerVolumeAsync(string sensorId, double volume)

@@ -5,6 +5,7 @@ namespace Syren.Server.Services;
 
 public interface IDistanceService
 {
+    public Task UpdateDistanceAsync(DistanceData distance);
     public Task UpdateDistancesAsync(IReadOnlyCollection<DistanceData> distances);
     public Task SetSpeakerVolumeAsync(string sensorId, double volume);
 

@@ -50,6 +50,11 @@ public class MqttOptions
     /// <summary>
     /// Topic for receiving sensor data from SyrenServer
     /// </summary>
+    public string UpdateDistanceTopic { get; set; } = "SyrenSystem/SyrenServer/UpdateDistance";
+
+    /// <summary>
+    /// Topic for receiving multiple sensor data from SyrenServer
+    /// </summary>
     public string UpdateDistancesTopic { get; set; } = "SyrenSystem/SyrenServer/UpdateDistances";
 
     /// <summary>
