@@ -1,11 +1,10 @@
-using System.Buffers;
-using System.Text;
 using System.Text.Json;
 using MQTTnet;
 using Microsoft.Extensions.Options;
 using Syren.Server.Configuration;
 using Syren.Server.Models;
 using Syren.Server.Services;
+using Syren.Server.Utils;
 
 namespace Syren.Server.Handlers;
 
@@ -34,7 +33,7 @@ public class UpdateDistanceHandler : IMqttMessageHandler
 
     public Task HandleMessageAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)
     {
-        var payload = GetPayloadAsString(message.Payload);
+        var payload = PayloadUtils.GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received UpdateDistance data:\n{Payload}\n", payload);
         
         try
@@ -54,20 +53,5 @@ public class UpdateDistanceHandler : IMqttMessageHandler
         }
 
         return Task.CompletedTask;
-    }
-
-    private static string GetPayloadAsString(ReadOnlySequence<byte> payload)
-    {
-        if (payload.IsEmpty)
-        {
-            return string.Empty;
-        }
-
-        if (payload.IsSingleSegment)
-        {
-            return Encoding.UTF8.GetString(payload.FirstSpan);
-        }
-
-        return Encoding.UTF8.GetString(payload.ToArray());
     }
 }

@@ -1,11 +1,10 @@
-using System.Buffers;
-using System.Text;
 using MQTTnet;
 using Microsoft.Extensions.Options;
 using Syren.Server.Configuration;
 using Syren.Server.Services;
 using System.Text.Json;
 using Syren.Server.Models;
+using Syren.Server.Utils;
 
 namespace Syren.Server.Handlers;
 
@@ -34,7 +33,7 @@ public class ConnectSpeakerHandler : IMqttMessageHandler
 
     public Task HandleMessageAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)
     {
-        var payload = GetPayloadAsString(message.Payload);
+        var payload = PayloadUtils.GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received speaker adding request:\n{Payload}\n", payload);
 
         try
@@ -56,18 +55,4 @@ public class ConnectSpeakerHandler : IMqttMessageHandler
         return Task.CompletedTask;
     }
 
-    private static string GetPayloadAsString(ReadOnlySequence<byte> payload)
-    {
-        if (payload.IsEmpty)
-        {
-            return string.Empty;
-        }
-
-        if (payload.IsSingleSegment)
-        {
-            return Encoding.UTF8.GetString(payload.FirstSpan);
-        }
-
-        return Encoding.UTF8.GetString(payload.ToArray());
-    }
 }
