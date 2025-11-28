@@ -28,15 +28,3 @@ public readonly struct JsonRpcRequest
     [JsonPropertyName("method")]
     public required string Method { get; init; }
 }
-
-public readonly struct JsonRpcResponse<T>
-{
-    [JsonPropertyName("jsonrpc")]
-    public required string JsonRpcVersion { get; init; }
-
-    [JsonPropertyName("id")]
-    public required string RequestId { get; init; }
-
-    [JsonPropertyName("result")]
-    public required T Result { get; init; }
-}
