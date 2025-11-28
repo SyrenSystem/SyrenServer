@@ -11,7 +11,7 @@ namespace Syren.Server.Handlers;
 
 /// <summary>
 /// Handler for sensor data messages from SyrenApp
-/// Topic: SyrenSystem/SyrenServer/UpdateDistances
+/// Topic: SyrenSystem/SyrenApp/UpdateDistances
 /// </summary>
 public class UpdateDistancesHandler : IMqttMessageHandler
 {

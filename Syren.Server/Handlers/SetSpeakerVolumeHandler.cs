@@ -11,7 +11,7 @@ namespace Syren.Server.Handlers;
 
 /// <summary>
 /// Handler for speaker volume setting requests from SyrenApp
-/// Topic: SyrenSystem/SyrenServer/SetSpeakerVolume
+/// Topic: SyrenSystem/SyrenApp/SetSpeakerVolume
 /// </summary>
 public class SetSpeakerVolumeHandler : IMqttMessageHandler
 {
