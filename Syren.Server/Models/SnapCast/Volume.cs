@@ -13,21 +13,8 @@ public readonly struct Volume
 
 public readonly struct SetVolumeRequest
 {
-    [JsonPropertyName("id")]
-    public required string Id { get; init; }
+    public const string MethodName = "Client.SetVolume";
 
-    [JsonPropertyName("jsonrpc")]
-    public required string JsonRpcVersion { get; init; }
-
-    [JsonPropertyName("method")]
-    public required string Method { get; init; }
-
-    [JsonPropertyName("params")]
-    public required SetVolumeRequestParams Params { get; init; }
-}
-
-public readonly struct SetVolumeRequestParams
-{
     [JsonPropertyName("id")]
     public required string Id { get; init; }
     

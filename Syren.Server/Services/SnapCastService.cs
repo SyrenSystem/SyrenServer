@@ -1,7 +1,6 @@
-using System.Text;
-using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Syren.Server.Configuration;
+using Syren.Server.Models;
 using Syren.Server.Models.SnapCast;
 
 namespace Syren.Server.Services;
@@ -25,15 +24,15 @@ public class SnapCastService : ISnapCastService
         };
     }
 
-    public async Task<Status?> GetStatusAsync()
+    public async Task<SystemStatus?> GetStatusAsync()
     {
         _logger.LogTrace("Getting SnapCast status");
 
         HttpResponseMessage response = await _httpClient.PostAsJsonAsync(
             "jsonrpc",
-            new GetStatusRequest
+            new JsonRpcRequest
             {
-                Id = 1,
+                RequestId = "getStatusRequest",
                 JsonRpcVersion = "2.0",
                 Method = "Server.GetStatus",
             }
@@ -47,7 +46,17 @@ public class SnapCastService : ISnapCastService
 
         _logger.LogInformation("SnapCast status:\n{Status}", await response.Content.ReadAsStringAsync());
 
-        return await response.Content.ReadFromJsonAsync<Status>();
+        try
+        {
+            return response.Content.ReadFromJsonAsync<JsonRpcResponse<GetStatusResult>>()
+                .Result
+                .Result
+                .SystemStatus;
+        } catch (Exception e)
+        {
+            _logger.LogError("Failed to get SnapCast status: {ErrorMsg}", e);
+            return null;
+        }
     }
 
     public async Task SetClientVolumeAsync(string id, int percent)
@@ -56,12 +65,12 @@ public class SnapCastService : ISnapCastService
 
         HttpResponseMessage response = await _httpClient.PostAsJsonAsync(
             "jsonrpc",
-            new SetVolumeRequest
+            new JsonRpcRequest<SetVolumeRequest>
             {
-                Id = "1",
+                RequestId = "setVolumeRequest",
                 JsonRpcVersion = "2.0",
-                Method = "Client.SetVolume",
-                Params = new SetVolumeRequestParams
+                Method = SetVolumeRequest.MethodName,
+                Parameters = new SetVolumeRequest
                 {
                     Id = id,
                     Volume = new Volume
@@ -89,7 +98,7 @@ public class SnapCastService : ISnapCastService
         var snapStatus = await GetStatusAsync();
         if (!snapStatus.HasValue) return null;
 
-        var client = snapStatus.Value.Result.SystemStatus.Clients()
+        var client = snapStatus.Value.Clients()
             .Select(client => (ClientStatus?)client)
             .FirstOrDefault(client => client?.Id == id, null);
 
