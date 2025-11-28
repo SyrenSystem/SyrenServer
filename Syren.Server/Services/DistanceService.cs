@@ -6,7 +6,7 @@ using Syren.Server.Extensions;
 
 namespace Syren.Server.Services;
 
-public class DistanceService : IDistanceService
+public class DistanceService : IDistanceService, IAsyncDisposable
 {
     private readonly Dictionary<string, Speaker> _speakers = [];
     private readonly Dictionary<string, SpeakerState> _speakerStates = [];
@@ -50,6 +50,17 @@ public class DistanceService : IDistanceService
                     await _snapCastService.SetClientVolumeAsync(speaker.SnapClientId, 0)
                 )
         );
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _logger.LogTrace("Shutting down DistanceService");
+
+        await Task.WhenAll(
+            _speakerStates.Values.Select(async state => await DisconnectSpeakerAsync(state.Speaker.SensorId))
+        );
+
+        GC.SuppressFinalize(this);
     }
 
     public async Task UpdateDistanceAsync(DistanceData distance)
