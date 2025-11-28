@@ -128,8 +128,9 @@ public class DistanceService : IDistanceService
             Speaker = _speakers[sensorId],
             Position = position,
             Distance = 0.0,
-            Volume = (await _snapCastService
-                .GetClientVolume(_speakers[sensorId].SnapClientId))
+            Volume = _snapCastService
+                .GetClientVolume(_speakers[sensorId].SnapClientId)
+                .Result
                 .GetValueOrDefault(1.0),
         };
 
