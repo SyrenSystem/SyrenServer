@@ -44,12 +44,10 @@ public class DistanceService : IDistanceService
 
 
         _logger.LogInformation("Setting all SnapClient volumes to 0");
-        Task.WaitAll(
+        Task.WhenAll(
             _speakers.Values
-                .Select
-                (
-                    speaker =>
-                    _snapCastService.SetClientVolumeAsync(speaker.SnapClientId, 0)
+                .Select(async speaker =>
+                    await _snapCastService.SetClientVolumeAsync(speaker.SnapClientId, 0)
                 )
         );
     }
@@ -79,8 +77,8 @@ public class DistanceService : IDistanceService
     {
         _logger.LogTrace("Updating {distanceCount} distances", distances.Count);
 
-        Task.WaitAll(distances.Select(
-                distanceData => UpdateDistanceAsync(distanceData)
+        await Task.WhenAll(distances.Select(async
+                distanceData => await UpdateDistanceAsync(distanceData)
             ));
     }
 
