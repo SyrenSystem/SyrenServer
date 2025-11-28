@@ -16,14 +16,14 @@ public class SetSpeakerVolumeHandler : IMqttMessageHandler
 {
     private readonly IDistanceService _distanceService;
     private readonly MqttOptions _mqttOptions;
-    private readonly ILogger<UpdateDistancesHandler> _logger;
+    private readonly ILogger<SetSpeakerVolumeHandler> _logger;
 
     public string Topic { get; }
 
     public SetSpeakerVolumeHandler(
         IDistanceService distanceService,
         IOptions<MqttOptions> mqttOptions,
-        ILogger<UpdateDistancesHandler> logger)
+        ILogger<SetSpeakerVolumeHandler> logger)
     {
         _distanceService = distanceService;
         _mqttOptions = mqttOptions.Value;
