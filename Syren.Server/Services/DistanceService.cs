@@ -5,9 +5,7 @@ namespace Syren.Server.Services;
 
 public class DistanceService : IDistanceService
 {
-    private readonly Dictionary<int, Speaker> _speakers = [];
-    private readonly Dictionary<int, double> _speakerDistances = [];
-    private int _maxSpeakerId = 0;
+    private readonly Dictionary<string, SpeakerState> _speakers = [];
 
     private readonly ILogger<DistanceService> _logger;
 
@@ -30,22 +28,21 @@ public class DistanceService : IDistanceService
                 continue;
             }
 
-            if (_speakerDistances.ContainsKey(distanceData.SpeakerId))
-            {
-                _speakerDistances[distanceData.SpeakerId] = distanceData.Distance;
-            } else
-            {
-                _speakerDistances.Add(distanceData.SpeakerId, distanceData.Distance);
-            }
+            _speakers[distanceData.SpeakerId].Distance = distanceData.Distance;
         }
     }
 
-    public Speaker AddSpeaker()
+    public Speaker AddSpeaker(string id)
     {
         _logger.LogTrace("Adding speaker with ID {speakerId}; new speaker count: {speakerCount}",
-                            _maxSpeakerId, _speakers.Count);
+                            id, _speakers.Count);
 
-        int id = _maxSpeakerId++;
+        if (_speakers.ContainsKey(id))
+        {
+            _logger.LogWarning("Tried to add existing speaker \"{Id}\"", id);
+            return _speakers[id].Speaker;
+        }
+
         Vector3 position = _speakers.Count switch
         {
             0 => GetAddedFirstSpeakerPosition(),
@@ -60,11 +57,7 @@ public class DistanceService : IDistanceService
             Position = position,
         };
 
-        _speakers.Add(speaker.Id, speaker);
-        UpdateDistances([new DistanceData{
-            SpeakerId = speaker.Id,
-            Distance = 0.0,
-        }]);
+        _speakers.Add(speaker.Id, new SpeakerState{Speaker = speaker, Distance = 0.0});
 
         _logger.LogDebug("Added speaker with ID {speakerId} at position {position}",
                             speaker.Id, speaker.Position);
@@ -77,91 +70,102 @@ public class DistanceService : IDistanceService
     {
         // Second speaker can be on any arbitrary point on the sphere
         // around the first at the distance between the two
-        Speaker otherSpeaker = _speakers.First().Value;
-        double otherDistance = _speakerDistances[otherSpeaker.Id];
+        SpeakerState otherSpeaker = _speakers.First().Value;
 
-        return otherSpeaker.Position + new Vector3((float)otherDistance, 0.0f, 0.0f);
+        return otherSpeaker.Speaker.Position + new Vector3((float)otherSpeaker.Distance, 0.0f, 0.0f);
     }
 
     private Vector3 GetAddedThirdSpeakerPosition()
     {
         // Third speaker can be on any arbitrary point on the circle
         // where the distances to both other speakers is correct
-        (Speaker Speaker, double Distance)[] speakers = _speakers
+        SpeakerState[] speakers = _speakers
+            .Values
             .Take(2)
-            .Select(keyValuePair =>
-                (keyValuePair.Value, _speakerDistances[keyValuePair.Key])
-            ).ToArray();
+            .ToArray();
 
         // Direction vector from the second speaker to the first
         Vector3 direction = Vector3.Normalize(speakers[1].Speaker.Position - speakers[0].Speaker.Position);
         float twoSpeakerDistance = Vector3.Distance(speakers[0].Speaker.Position, speakers[1].Speaker.Position);
 
-        // Points on the distance spheres farthest away from the other speaker's position
-        Tuple<Vector3, Vector3> farPoints = new(
-            speakers[0].Speaker.Position + direction * (float)speakers[0].Distance,
-            speakers[1].Speaker.Position - direction * (float)speakers[1].Distance
-        );
-        // Points on the distance spheres closest to the other speaker's position
-        Tuple<Vector3, Vector3> nearPoints = new(
-            speakers[0].Speaker.Position - direction * (float)speakers[0].Distance,
-            speakers[1].Speaker.Position + direction * (float)speakers[1].Distance
-        );
+        // Points on the distance spheres closest and farthest away from the other speaker's position
+        (Vector3 Near, Vector3 Far)[] extrema = [
+            (
+                speakers[0].Speaker.Position + direction * (float)speakers[0].Distance,
+                speakers[0].Speaker.Position - direction * (float)speakers[0].Distance
+            ),
+            (
+                speakers[1].Speaker.Position - direction * (float)speakers[1].Distance,
+                speakers[1].Speaker.Position + direction * (float)speakers[1].Distance
+            )
+        ];
 
         if (twoSpeakerDistance > speakers[0].Distance + speakers[1].Distance)
         {
             // Two speakers' distance spheres are disjoint
-            // Place speaker on the connecting line at the right ratio
-            float distanceRatio = (float)(speakers[1].Distance / (speakers[0].Distance + speakers[1].Distance));
-            return Vector3.Lerp(nearPoints.Item1, nearPoints.Item2, distanceRatio);
-        } else if (speakers[0].Distance > (speakers[0].Speaker.Position - farPoints.Item2).Length())
+            // Place speaker halfway between the two circles' perimeters
+            return (extrema[0].Near + extrema[1].Near) / 2.0f;
+        } else if (speakers[0].Distance > (speakers[0].Speaker.Position - extrema[1].Far).Length())
         {
             // Second speaker's distance sphere is inside the first's distance sphere
             // Place speaker closest to both boundaries
-            return (nearPoints.Item1 + farPoints.Item2) / 2.0f;
-        } else if (speakers[1].Distance > (speakers[1].Speaker.Position - farPoints.Item1).Length())
+            return (extrema[0].Near + extrema[1].Far) / 2.0f;
+        } else if (speakers[1].Distance > (speakers[1].Speaker.Position - extrema[0].Far).Length())
         {
             // First speaker's distance sphere is inside the second's distance sphere
             // Place speaker closest to both boundaries
-            return (nearPoints.Item2 + farPoints.Item1) / 2.0f;
+            return (extrema[1].Near + extrema[0].Far) / 2.0f;
         } else
         {
             // Two distance spheres intersect
             // Place speaker at an intersection point
-            float speaker1Angle = MathF.Atan((float)(speakers[1].Distance / speakers[0].Distance));
+
+            // Law of cosines
+            float speaker1Angle = MathF.Acos(
+                (
+                    MathF.Pow((float)speakers[0].Distance, 2.0f) +
+                    MathF.Pow(twoSpeakerDistance, 2.0f) -
+                    MathF.Pow((float)speakers[1].Distance, 2.0f)
+                ) / (
+                    2.0f * (float)speakers[0].Distance * twoSpeakerDistance
+                )
+            );
+
             Vector3 orthogonal = Vector3.Normalize(new(
                 direction.Y + direction.Z,
                 direction.Z - direction.X,
                 -direction.X - direction.Y
             ));
             return speakers[0].Speaker.Position +
-                direction * MathF.Sin(speaker1Angle) +
-                orthogonal * MathF.Cos(speaker1Angle);
+                (float)speakers[0].Distance * (
+                    orthogonal * MathF.Sin(speaker1Angle) +
+                    direction * MathF.Cos(speaker1Angle)
+                );
         }
     }
 
     private Vector3 GetAddedTrilateratedSpeakerPosition()
     {
         // Fourth speaker onward can be located with gradient descent
-        DistanceData[] distances = _speakerDistances
+        DistanceData[] distances = _speakers
             .Select(keyValue =>
-                new DistanceData() { SpeakerId = keyValue.Key, Distance = keyValue.Value }
+                new DistanceData() { SpeakerId = keyValue.Key, Distance = keyValue.Value.Distance }
             ).ToArray();
         return GetUserPosition(distances);
     }
 
 
-    public void RemoveSpeaker(int id)
+    public void RemoveSpeaker(string id)
     {
         _logger.LogTrace("Removing speaker {ID}", id);
 
         if (!_speakers.ContainsKey(id))
         {
             _logger.LogWarning("Tried to remove speaker with unknown ID {ID}", id);
+            return;
         }
 
         _speakers.Remove(id);
-        _speakerDistances.Remove(id);
     }
 
 
@@ -187,7 +191,7 @@ public class DistanceService : IDistanceService
             .Where(distance => _speakers.ContainsKey(distance.SpeakerId))
             .GroupBy(distance => distance.SpeakerId)
             .Select(speakerDistances => new Sphere() {
-                Center = _speakers[speakerDistances.Key].Position,
+                Center = _speakers[speakerDistances.Key].Speaker.Position,
                 Radius = speakerDistances.Single().Distance
             }).ToArray();
 
@@ -196,15 +200,20 @@ public class DistanceService : IDistanceService
             throw new ArgumentException($"Tried to calculate user position using {spheres.Length} < 3 data points.");
         }
 
-        return PoorMansGradientDescent(_speakers.Values.Center(), vector => MeanSquaredError(vector, spheres));
+        Vector3 center = _speakers
+            .Values
+            .Select(state => state.Speaker)
+            .ToList()
+            .Center();
+        return PoorMansGradientDescent(center, vector => MeanAbsError(vector, spheres));
     }
 
-    private static double MeanSquaredError(Vector3 position, Sphere[] spheres)
+    private static double MeanAbsError(Vector3 position, Sphere[] spheres)
     {
         return spheres.Select(sphere =>
         {
             float distance = Vector3.Distance(sphere.Center, position);
-            return Math.Pow(sphere.Radius - distance, 2.0);
+            return Math.Abs(sphere.Radius - distance);
         }).Sum() / spheres.Length;
     }
 
@@ -212,23 +221,47 @@ public class DistanceService : IDistanceService
     {
         Vector3 result = initialValue;
         double errorVal = errorFunc(result);
+        float eta = (float)errorVal;
 
-        const double threshold = 0.3f;
-        const uint maxIterations = 10;
+        const double threshold = 0.1f;
+        const uint maxIterations = 100;
 
         // Poor man's gradient descent
-        for (uint i = 0; i < maxIterations; i++)
+        for (uint iterationCt = 0; iterationCt < maxIterations; iterationCt++)
         {
-            if (errorVal <= threshold) return result;
+            if (errorVal <= threshold) {
+                _logger.LogInformation(@"User position {Position} has error value {Error:0.00} <= {Threshold:0.00}
+                    in {IterationCt} iterations", result, errorVal, threshold, iterationCt);
+                return result;
+            }
 
-            (result, errorVal) = _directions
-                .Select(direction => result + direction * (float)errorVal)
+            (var newResult, var newErrorVal) = _directions
+                .Select(gradient => result + gradient * eta)
                 .Select(position => (position, errorFunc(position)))
                 .MinBy<(Vector3 Position, double ErrorVal), double>(tuple => tuple.ErrorVal);
+            
+            if (newErrorVal < errorVal)
+            {
+                // New value is better; keep going with the new value
+                result = newResult;
+                errorVal = newErrorVal;
+                eta = (float)errorVal;
+            } else
+            {
+                // We overshot; reduce eta
+                eta /= 2.0f;
+            }
         }
 
-        _logger.LogWarning("User position {Position} has error value of {Error:0.00} > {Threshold:0.00}", result, errorVal, threshold);
+        _logger.LogWarning(@"User position {Position} has error value of {Error:0.00} > {Threshold:0.00}
+            in {IterationCt} iterations", result, errorVal, threshold, maxIterations);
 
         return result;
     }
+}
+
+public sealed record SpeakerState
+{
+    public Speaker Speaker;
+    public double Distance;
 }
