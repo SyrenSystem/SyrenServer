@@ -2,6 +2,7 @@ using System.Numerics;
 using Syren.Server.Configuration;
 using Syren.Server.Models;
 using Microsoft.Extensions.Options;
+using Syren.Server.Extensions;
 
 namespace Syren.Server.Services;
 
