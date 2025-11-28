@@ -41,13 +41,13 @@ public class SetSpeakerVolumeHandler : IMqttMessageHandler
         {
             var speakerVolumeData = JsonSerializer.Deserialize<SetSpeakerVolumeData>(payload);
 
-            if (speakerVolumeData.volume < 0.0)
+            if (speakerVolumeData.Volume < 0.0)
             {
-                _logger.LogError("Cannot set volume to a value {Volume} < 0", speakerVolumeData.volume);
+                _logger.LogError("Cannot set volume to a value {Volume} < 0", speakerVolumeData.Volume);
                 return Task.CompletedTask;
             }
 
-            _distanceService.SetSpeakerVolumeAsync(speakerVolumeData.sensorId, speakerVolumeData.volume);
+            _distanceService.SetSpeakerVolumeAsync(speakerVolumeData.SensorId, speakerVolumeData.Volume);
         }
         catch (JsonException ex)
         {

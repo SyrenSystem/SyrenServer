@@ -5,8 +5,8 @@ namespace Syren.Server.Models;
 public readonly struct SetSpeakerVolumeData
 {
     [JsonPropertyName("id")]
-    public required string sensorId { get; init; }
+    public required string SensorId { get; init; }
 
     [JsonPropertyName("volume")]
-    public required double volume { get; init; }
+    public required double Volume { get; init; }
 }

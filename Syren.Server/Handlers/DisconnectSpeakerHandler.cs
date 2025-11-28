@@ -41,7 +41,7 @@ public class DisconnectSpeakerHandler : IMqttMessageHandler
         {
             var disconnectSpeakerData = JsonSerializer.Deserialize<DisconnectSpeakerData>(payload);
 
-            _distanceService.DisconnectSpeakerAsync(disconnectSpeakerData.sensorId);
+            _distanceService.DisconnectSpeakerAsync(disconnectSpeakerData.SensorId);
         }
         catch (JsonException ex)
         {
