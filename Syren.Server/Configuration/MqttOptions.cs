@@ -71,4 +71,9 @@ public class MqttOptions
     /// Topic for removing speakers from SyrenServer
     /// </summary>
     public string DisconnectSpeakerTopic { get; set; } = "SyrenSystem/SyrenApp/DisconnectSpeaker";
+
+    /// <summary>
+    /// Topic for sending speaker positions on speaker position update
+    /// </summary>
+    public string GetSpeakerPositionTopic { get; set; } = "SyrenSystem/SyrenServer/GetSpeakerPosition";
 }

@@ -218,7 +218,7 @@ public class MqttClientService : IMqttClientService, IAsyncDisposable
             var handler = _handlers.FirstOrDefault(h => h.Topic == topic);
             if (handler != null)
             {
-                await handler.HandleMessageAsync(args.ApplicationMessage);
+                await handler.HandleMessageAsync(args.ApplicationMessage, this);
             }
             else
             {

@@ -31,7 +31,7 @@ public class UpdateDistancesHandler : IMqttMessageHandler
         Topic = _mqttOptions.UpdateDistancesTopic;
     }
 
-    public Task HandleMessageAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)
+    public Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
     {
         var payload = PayloadUtils.GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received UpdateDistance data:\n{Payload}\n", payload);
