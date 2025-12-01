@@ -12,5 +12,5 @@ public interface IDistanceService
     public Task<SpeakerState?> ConnectSpeakerAsync(string sensorId);
     public Task DisconnectSpeakerAsync(string sensorId);
 
-    public Vector3 GetUserPosition(IReadOnlyCollection<DistanceData> distances);
+    public Vector3? GetUserPosition();
 }

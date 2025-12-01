@@ -119,7 +119,7 @@ public class DistanceService : IDistanceService, IAsyncDisposable
     public async Task<SpeakerState?> ConnectSpeakerAsync(string sensorId)
     {
         _logger.LogTrace("Connecting speaker with ID {speakerId}; new speaker count: {speakerCount}",
-                            sensorId, _speakerStates.Count);
+                            sensorId, _speakerStates.Count + 1);
 
         if (!_speakers.ContainsKey(sensorId))
         {
@@ -249,11 +249,7 @@ public class DistanceService : IDistanceService, IAsyncDisposable
         _logger.LogTrace("Computing >= 4th speaker position");
 
         // Fourth speaker onward can be located with gradient descent
-        DistanceData[] distances = _speakerStates
-            .Select(keyValue =>
-                new DistanceData() { SpeakerId = keyValue.Key, Distance = keyValue.Value.Distance }
-            ).ToArray();
-        return GetUserPosition(distances);
+        return GetUserPosition()!.Value;
     }
 
 
@@ -281,7 +277,22 @@ public class DistanceService : IDistanceService, IAsyncDisposable
         new( 0.0f,  0.0f, -1.0f)
     ];
 
-    public Vector3 GetUserPosition(IReadOnlyCollection<DistanceData> distances)
+    public Vector3? GetUserPosition() {
+        if (_speakerStates.Count < 3)
+        {
+            _logger.LogWarning("Unable to get user position with {SpeakerCount} < 3 speaker distances", _speakerStates.Count);
+            return null;
+        }
+
+        DistanceData[] distances = _speakerStates
+            .Select(keyValue =>
+                new DistanceData() { SpeakerId = keyValue.Key, Distance = keyValue.Value.Distance }
+            ).ToArray();
+
+        return GetUserPosition(distances);
+    }
+
+    private Vector3 GetUserPosition(IReadOnlyCollection<DistanceData> distances)
     {
         _logger.LogTrace("Calculating user position");
 

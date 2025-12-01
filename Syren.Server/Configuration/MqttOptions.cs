@@ -76,4 +76,9 @@ public class MqttOptions
     /// Topic for sending speaker positions on speaker position update
     /// </summary>
     public string GetSpeakerPositionTopic { get; set; } = "SyrenSystem/SyrenServer/GetSpeakerPosition";
+
+    /// <summary>
+    /// Topic for sending user position on speaker distance update
+    /// </summary>
+    public string GetUserPositionTopic {get; set; } = "SyrenSystem/SyrenServer/GetUserPosition";
 }
