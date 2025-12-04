@@ -74,7 +74,7 @@ public class SnapCastService : ISnapCastService
                     Id = id,
                     Volume = new Volume
                     {
-                        Muted = percent == 0,
+                        Muted = false,
                         Percentage = percent,
                     },
                 },
