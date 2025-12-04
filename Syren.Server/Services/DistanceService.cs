@@ -73,7 +73,7 @@ public class DistanceService : IDistanceService, IAsyncDisposable
 
         if (!_speakers.ContainsKey(distance.SpeakerId))
         {
-            _logger.LogError("Tried to update distance of unknown speaker with ID {ID}",
+            _logger.LogWarning("Tried to update distance of unknown speaker with ID {ID}",
                             distance.SpeakerId);
             return;
         }
