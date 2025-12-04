@@ -86,7 +86,7 @@ public class DistanceService : IDistanceService, IAsyncDisposable
         double volume = state.Volume * distanceVolumeModifier;
         _logger.LogInformation("DistanceVolumeModifier: {DistanceVolumeModifier}; Volume: {Volume}", distanceVolumeModifier, volume);
 
-        await _snapCastService.SetClientVolumeAsync(state.Speaker.SnapClientId, (int)(volume * 100.0));
+        await _snapCastService.SetClientVolumeAsync(state.Speaker.SnapClientId, (int)volume);
     }
 
     public async Task UpdateDistancesAsync(IReadOnlyCollection<DistanceData> distances)
@@ -113,7 +113,7 @@ public class DistanceService : IDistanceService, IAsyncDisposable
 
         double distanceVolumeModifier = GetDistanceVolumeModifier(sensorId, state.Distance);
         double snapVolume = volume * distanceVolumeModifier;
-        await _snapCastService.SetClientVolumeAsync(state.Speaker.SnapClientId, (int)(snapVolume * 100.0));
+        await _snapCastService.SetClientVolumeAsync(state.Speaker.SnapClientId, (int)snapVolume);
     }
 
     public async Task<SpeakerState?> ConnectSpeakerAsync(string sensorId)
@@ -146,14 +146,11 @@ public class DistanceService : IDistanceService, IAsyncDisposable
             Speaker = _speakers[sensorId],
             Position = position,
             Distance = 0.0,
-            Volume = _snapCastService
-                .GetClientVolume(_speakers[sensorId].SnapClientId)
-                .Result
-                .GetValueOrDefault(1.0),
+            Volume = 100.0,
         };
 
         _speakerStates.Add(sensorId, speakerState);
-        await _snapCastService.SetClientVolumeAsync(_speakers[sensorId].SnapClientId, (int)(speakerState.Volume * 100));
+        await _snapCastService.SetClientVolumeAsync(_speakers[sensorId].SnapClientId, (int)speakerState.Volume);
 
         _logger.LogDebug("Connected speaker with ID {speakerId} at position {position}",
                             sensorId, speakerState.Position);
