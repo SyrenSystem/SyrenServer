@@ -60,6 +60,7 @@ public class SnapCastService : ISnapCastService
 
     public async Task SetClientVolumeAsync(string id, int percent)
     {
+        id = id.ToLower();
         _logger.LogTrace("Setting SnapClient \"{Id}\" volume to {Percent}%", id, percent);
 
         HttpResponseMessage response = await _httpClient.PostAsJsonAsync(
