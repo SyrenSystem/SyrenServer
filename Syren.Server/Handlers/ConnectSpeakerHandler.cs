@@ -63,7 +63,7 @@ public class ConnectSpeakerHandler : IMqttMessageHandler
     {
         var speakerDistance = new SpeakerPosition
         {
-            SpeakerId = speakerState.Speaker.SensorId,
+            SpeakerId = speakerState.Speaker.SensorId.ToLower(),
             Position = new PositionVector{
                 X = speakerState.Position.X,
                 Y = speakerState.Position.Y,
