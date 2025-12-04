@@ -31,7 +31,7 @@ public class ConnectSpeakerHandler : IMqttMessageHandler
         Topic = _mqttOptions.ConnectSpeakerTopic;
     }
 
-    public Task HandleMessageAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)
+    public async Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
     {
         var payload = PayloadUtils.GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received speaker adding request:\n{Payload}\n", payload);
@@ -40,7 +40,13 @@ public class ConnectSpeakerHandler : IMqttMessageHandler
         {
             var connectSpeakerData = JsonSerializer.Deserialize<ConnectSpeakerData>(payload);
 
-            _distanceService.ConnectSpeakerAsync(connectSpeakerData.SensorId);
+            SpeakerState? speakerState = await _distanceService.ConnectSpeakerAsync(connectSpeakerData.SensorId);
+            if (speakerState == null) {
+                _logger.LogInformation("Not publishing new speaker position. Connecting speaker failed.");
+                return;
+            }
+
+            await PublishSpeakerPosition(speakerState, client);
         }
         catch (JsonException ex)
         {
@@ -51,8 +57,27 @@ public class ConnectSpeakerHandler : IMqttMessageHandler
         {
             _logger.LogError(ex, "Error handling connect speaker request from topic {Topic}", message.Topic);
         }
-
-        return Task.CompletedTask;
     }
 
+    private async Task PublishSpeakerPosition(SpeakerState speakerState, IMqttClientService client)
+    {
+        var speakerDistance = new SpeakerPosition
+        {
+            SpeakerId = speakerState.Speaker.SensorId,
+            Position = new PositionVector{
+                X = speakerState.Position.X,
+                Y = speakerState.Position.Y,
+                Z = speakerState.Position.Z,
+            },
+        };
+
+        try
+        {
+            await client.PublishAsync(_mqttOptions.GetSpeakerPositionTopic, speakerDistance);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish new speaker position");
+        }
+    }
 }

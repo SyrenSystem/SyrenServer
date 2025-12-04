@@ -31,7 +31,7 @@ public class DisconnectSpeakerHandler : IMqttMessageHandler
         Topic = _mqttOptions.DisconnectSpeakerTopic;
     }
 
-    public Task HandleMessageAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)
+    public Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
     {
         var payload = PayloadUtils.GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received speaker removal request:\n{Payload}\n", payload);

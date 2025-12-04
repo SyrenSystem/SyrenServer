@@ -1,4 +1,5 @@
 using MQTTnet;
+using Syren.Server.Services;
 
 namespace Syren.Server.Handlers;
 
@@ -12,7 +13,7 @@ public interface IMqttMessageHandler
     /// </summary>
     /// <param name="message">MQTT application message</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    Task HandleMessageAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default);
+    Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Get the topic this handler is responsible for

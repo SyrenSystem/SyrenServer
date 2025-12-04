@@ -5,6 +5,7 @@ using Syren.Server.Configuration;
 using Syren.Server.Models;
 using Syren.Server.Services;
 using Syren.Server.Utils;
+using System.Numerics;
 
 namespace Syren.Server.Handlers;
 
@@ -31,7 +32,7 @@ public class UpdateDistanceHandler : IMqttMessageHandler
         Topic = _mqttOptions.UpdateDistanceTopic;
     }
 
-    public Task HandleMessageAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)
+    public async Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
     {
         var payload = PayloadUtils.GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received UpdateDistance data:\n{Payload}\n", payload);
@@ -40,7 +41,12 @@ public class UpdateDistanceHandler : IMqttMessageHandler
         {
             
             var distanceData = JsonSerializer.Deserialize<DistanceData>(payload);
-            _distanceService.UpdateDistanceAsync(distanceData);
+            await _distanceService.UpdateDistanceAsync(distanceData);
+
+            Vector3? userPosition = _distanceService.GetUserPosition();
+            if (userPosition.HasValue) {
+                await PublishUserPosition(userPosition.Value, client);
+            }
         }
         catch (JsonException ex)
         {
@@ -51,7 +57,26 @@ public class UpdateDistanceHandler : IMqttMessageHandler
         {
             _logger.LogError(ex, "Error handling distance data from topic {Topic}", message.Topic);
         }
+    }
 
-        return Task.CompletedTask;
+    private async Task PublishUserPosition(Vector3 position, IMqttClientService client)
+    {
+        var userPosition = new UserPosition
+        {
+            Position = new PositionVector{
+                X = position.X,
+                Y = position.Y,
+                Z = position.Z,
+            },
+        };
+
+        try
+        {
+            await client.PublishAsync(_mqttOptions.GetUserPositionTopic, userPosition);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish new user position");
+        }
     }
 }

@@ -31,7 +31,7 @@ public class SetSpeakerVolumeHandler : IMqttMessageHandler
         Topic = _mqttOptions.SetSpeakerVolumeTopic;
     }
 
-    public Task HandleMessageAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)
+    public Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
     {
         var payload = PayloadUtils.GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received SetSpeakerVolume data:\n{Payload}\n", payload);
