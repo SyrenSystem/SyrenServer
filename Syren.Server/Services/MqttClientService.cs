@@ -77,6 +77,9 @@ public class MqttClientService : IMqttClientService, IAsyncDisposable
             else
             {
                 _logger.LogError("Failed to connect to MQTT broker: {ResultCode}", result.ResultCode);
+                throw new InvalidOperationException(
+                    $"Failed to connect to MQTT broker: {result.ResultCode}"
+                );
             }
         }
         catch (Exception ex)
@@ -186,24 +189,7 @@ public class MqttClientService : IMqttClientService, IAsyncDisposable
         _logger.LogWarning("MQTT client disconnected: {Reason}", args.Reason);
         _isConnected = false;
         
-        // Auto-reconnect if enabled
-        if (_options.AutoReconnect && args.ClientWasConnected)
-        {
-            _logger.LogInformation("Will attempt to reconnect in {Seconds} seconds", _options.ReconnectDelaySeconds);
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(TimeSpan.FromSeconds(_options.ReconnectDelaySeconds));
-                try
-                {
-                    await ConnectAsync();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Auto-reconnect failed");
-                }
-            });
-        }
-        
+
         return Task.CompletedTask;
     }
 

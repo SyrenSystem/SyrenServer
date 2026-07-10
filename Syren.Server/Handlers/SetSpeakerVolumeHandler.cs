@@ -31,7 +31,7 @@ public class SetSpeakerVolumeHandler : IMqttMessageHandler
         Topic = _mqttOptions.SetSpeakerVolumeTopic;
     }
 
-    public Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
+    public async Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
     {
         var payload = PayloadUtils.GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received SetSpeakerVolume data:\n{Payload}\n", payload);
@@ -43,10 +43,10 @@ public class SetSpeakerVolumeHandler : IMqttMessageHandler
             if (speakerVolumeData.Volume < 0.0)
             {
                 _logger.LogError("Cannot set volume to a value {Volume} < 0", speakerVolumeData.Volume);
-                return Task.CompletedTask;
+                return;
             }
 
-            _distanceService.SetSpeakerVolumeAsync(speakerVolumeData.SensorId, speakerVolumeData.Volume);
+            await _distanceService.SetSpeakerVolumeAsync(speakerVolumeData.SensorId, speakerVolumeData.Volume);
         }
         catch (JsonException ex)
         {
@@ -57,7 +57,5 @@ public class SetSpeakerVolumeHandler : IMqttMessageHandler
         {
             _logger.LogError(ex, "Error handling sensor data from topic {Topic}", message.Topic);
         }
-
-        return Task.CompletedTask;
     }
 }

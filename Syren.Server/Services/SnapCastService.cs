@@ -85,7 +85,7 @@ public class SnapCastService : ISnapCastService
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogError("Failed to set SnapClient \"{Id}\" volume to {Percent}%", id, percent);
-            return;
+            response.EnsureSuccessStatusCode();
         }
 
         _logger.LogInformation(await response.Content.ReadAsStringAsync());
