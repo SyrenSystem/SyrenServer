@@ -31,7 +31,7 @@ public class DisconnectSpeakerHandler : IMqttMessageHandler
         Topic = _mqttOptions.DisconnectSpeakerTopic;
     }
 
-    public Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
+    public async Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
     {
         var payload = PayloadUtils.GetPayloadAsString(message.Payload);
         _logger.LogDebug("Received speaker removal request:\n{Payload}\n", payload);
@@ -40,7 +40,7 @@ public class DisconnectSpeakerHandler : IMqttMessageHandler
         {
             var disconnectSpeakerData = JsonSerializer.Deserialize<DisconnectSpeakerData>(payload);
 
-            _distanceService.DisconnectSpeakerAsync(disconnectSpeakerData.SensorId);
+            await _distanceService.DisconnectSpeakerAsync(disconnectSpeakerData.SensorId);
         }
         catch (JsonException ex)
         {
@@ -51,7 +51,5 @@ public class DisconnectSpeakerHandler : IMqttMessageHandler
         {
             _logger.LogError(ex, "Error handling disconnect speaker request from topic {Topic}", message.Topic);
         }
-
-        return Task.CompletedTask;
     }
 }

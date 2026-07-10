@@ -6,7 +6,7 @@ using Syren.Server.Extensions;
 
 namespace Syren.Server.Services;
 
-public class DistanceService : IDistanceService, IAsyncDisposable
+public class DistanceService : IDistanceService, IHostedService
 {
     private readonly Dictionary<string, Speaker> _speakers = [];
     private readonly Dictionary<string, SpeakerState> _speakerStates = [];
@@ -45,26 +45,26 @@ public class DistanceService : IDistanceService, IAsyncDisposable
                 speaker.SensorId, speaker.SnapClientId
             );
         }
+    }
 
-
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
         _logger.LogInformation("Setting all SnapClient volumes to 0");
-        Task.WhenAll(
-            _speakers.Values
-                .Select(async speaker =>
-                    await _snapCastService.SetClientVolumeAsync(speaker.SnapClientId, 0)
-                )
+        await Task.WhenAll(
+            _speakers.Values.Select(speaker =>
+                _snapCastService.SetClientVolumeAsync(speaker.SnapClientId, 0)
+            )
         );
     }
 
-    public async ValueTask DisposeAsync()
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogTrace("Shutting down DistanceService");
 
-        await Task.WhenAll(
-            _speakerStates.Values.Select(async state => await DisconnectSpeakerAsync(state.Speaker.SensorId))
-        );
-
-        GC.SuppressFinalize(this);
+        foreach (string sensorId in _speakerStates.Keys.ToArray())
+        {
+            await DisconnectSpeakerAsync(sensorId);
+        }
     }
 
     public async Task UpdateDistanceAsync(DistanceData distance)
@@ -83,7 +83,7 @@ public class DistanceService : IDistanceService, IAsyncDisposable
         state.Distance = distance.Distance * _syrenSettings.DistanceSmoothingFactor
             + state.Distance * (1.0 - _syrenSettings.DistanceSmoothingFactor);
 
-        double distanceVolumeModifier = GetDistanceVolumeModifier(speakerId, distance.Distance);
+        double distanceVolumeModifier = GetDistanceVolumeModifier(speakerId, state.Distance);
         double volume = state.Volume * distanceVolumeModifier;
         _logger.LogInformation("DistanceVolumeModifier: {DistanceVolumeModifier}; Volume: {Volume}", distanceVolumeModifier, volume);
 

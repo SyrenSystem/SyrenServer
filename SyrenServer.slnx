@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="Syren.Server/Syren.Server.csproj" />
+  <Project Path="Syren.Server.Tests/Syren.Server.Tests.csproj" />
 </Solution>
