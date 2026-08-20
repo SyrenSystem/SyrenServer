@@ -2,224 +2,255 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using MQTTnet;
+using MQTTnet.Protocol;
 using Syren.Server.Configuration;
 using Syren.Server.Handlers;
+using Syren.Server.Models;
 
 namespace Syren.Server.Services;
 
-/// <summary>
-/// MQTT client service for managing broker connections and message publishing
-/// </summary>
-public class MqttClientService : IMqttClientService, IAsyncDisposable
+public sealed class MqttClientService : IMqttClientService, IAsyncDisposable
 {
     private readonly IMqttClient _mqttClient;
     private readonly MqttOptions _options;
-    private readonly IEnumerable<IMqttMessageHandler> _handlers;
+    private readonly IReadOnlyList<IMqttMessageHandler> _handlers;
+    private readonly IDistanceService _distanceService;
+    private readonly ServerSession _session;
     private readonly ILogger<MqttClientService> _logger;
     private bool _isConnected;
-
-    public bool IsConnected => _isConnected && _mqttClient.IsConnected;
 
     public MqttClientService(
         IOptions<MqttOptions> options,
         IEnumerable<IMqttMessageHandler> handlers,
+        IDistanceService distanceService,
+        ServerSession session,
+        ISyrenMqttClientFactory clientFactory,
         ILogger<MqttClientService> logger)
     {
         _options = options.Value;
-        _handlers = handlers;
+        _handlers = handlers.ToArray();
+        _distanceService = distanceService;
+        _session = session;
         _logger = logger;
-
-        var factory = new MqttClientFactory();
-        _mqttClient = factory.CreateMqttClient();
-
-        // Set up event handlers
+        _mqttClient = clientFactory.CreateClient();
         _mqttClient.ConnectedAsync += OnConnectedAsync;
         _mqttClient.DisconnectedAsync += OnDisconnectedAsync;
         _mqttClient.ApplicationMessageReceivedAsync += OnMessageReceivedAsync;
     }
 
+    public bool IsConnected => _isConnected && _mqttClient.IsConnected;
+
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
-        _logger.LogTrace("Connecting to MQTT broker");
+        var optionsBuilder = new MqttClientOptionsBuilder()
+            .WithTcpServer(_options.Host, _options.Port)
+            .WithClientId(_options.ClientId)
+            .WithCleanSession()
+            .WithWillTopic(_options.ServerStatusTopic)
+            .WithWillPayload(JsonSerializer.SerializeToUtf8Bytes(CreateStatus(online: false)))
+            .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+            .WithWillRetain();
+
+        if (!string.IsNullOrEmpty(_options.Username))
+        {
+            optionsBuilder.WithCredentials(_options.Username, _options.Password);
+        }
+        if (_options.UseTls)
+        {
+            optionsBuilder.WithTlsOptions(tlsOptions => tlsOptions.UseTls());
+        }
 
         try
         {
-            var optionsBuilder = new MqttClientOptionsBuilder()
-                .WithTcpServer(_options.Host, _options.Port)
-                .WithClientId(_options.ClientId)
-                .WithCleanSession();
-
-            // Add credentials if provided
-            if (!string.IsNullOrEmpty(_options.Username))
+            MqttClientConnectResult result = await _mqttClient.ConnectAsync(
+                optionsBuilder.Build(),
+                cancellationToken
+            );
+            if (result.ResultCode != MqttClientConnectResultCode.Success)
             {
-                optionsBuilder.WithCredentials(_options.Username, _options.Password);
-            }
-
-            // Add TLS if enabled
-            if (_options.UseTls)
-            {
-                optionsBuilder.WithTlsOptions(o => o.UseTls());
-            }
-
-            var clientOptions = optionsBuilder.Build();
-
-            _logger.LogInformation("Connecting to MQTT broker at {Host}:{Port}", _options.Host, _options.Port);
-            var result = await _mqttClient.ConnectAsync(clientOptions, cancellationToken);
-
-            if (result.ResultCode == MqttClientConnectResultCode.Success)
-            {
-                _isConnected = true;
-                _logger.LogInformation("Successfully connected to MQTT broker");
-
-                // Subscribe to all topics
-                await SubscribeToTopicsAsync(cancellationToken);
-            }
-            else
-            {
-                _logger.LogError("Failed to connect to MQTT broker: {ResultCode}", result.ResultCode);
                 throw new InvalidOperationException(
-                    $"Failed to connect to MQTT broker: {result.ResultCode}"
+                    $"MQTT connection failed with {result.ResultCode}"
                 );
             }
+
+            await SubscribeToTopicsAsync(cancellationToken);
+            _isConnected = true;
+            _logger.LogInformation("Connected and subscribed to MQTT at {Host}:{Port}", _options.Host, _options.Port);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            _logger.LogError(ex, "Error connecting to MQTT broker");
+            _isConnected = false;
+            await DisconnectRawClientBestEffortAsync();
+            _logger.LogError(exception, "Unable to establish the MQTT connection");
             throw;
         }
     }
 
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
-        _logger.LogTrace("Disconnecting from MQTT broker");
-
-        try
+        _isConnected = false;
+        if (_mqttClient.IsConnected)
         {
-            if (_mqttClient.IsConnected)
-            {
-                _logger.LogInformation("Disconnecting from MQTT broker");
-                var disconnectOptions = new MqttClientDisconnectOptionsBuilder().Build();
-                await _mqttClient.DisconnectAsync(disconnectOptions, cancellationToken);
-                _isConnected = false;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error disconnecting from MQTT broker");
-            throw;
+            MqttClientDisconnectOptions options = new MqttClientDisconnectOptionsBuilder().Build();
+            await _mqttClient.DisconnectAsync(options, cancellationToken);
         }
     }
 
-    public async Task PublishAsync<T>(string topic, T message, CancellationToken cancellationToken = default)
+    public Task PublishAsync<T>(
+        string topic,
+        T message,
+        bool retain = false,
+        MqttQualityOfServiceLevel qualityOfService = MqttQualityOfServiceLevel.AtLeastOnce,
+        CancellationToken cancellationToken = default)
     {
-        _logger.LogTrace("Publishing to MQTT topic \"{Topic}\" message \"{Message}\"", topic, message);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(message);
+        return PublishPayloadAsync(topic, payload, retain, qualityOfService, cancellationToken);
+    }
 
+    public Task ClearRetainedAsync(
+        string topic,
+        CancellationToken cancellationToken = default) =>
+        PublishPayloadAsync(
+            topic,
+            [],
+            retain: true,
+            MqttQualityOfServiceLevel.AtLeastOnce,
+            cancellationToken
+        );
+
+    public Task PublishEmptyAsync(
+        string topic,
+        bool retain = false,
+        MqttQualityOfServiceLevel qualityOfService = MqttQualityOfServiceLevel.AtMostOnce,
+        CancellationToken cancellationToken = default) =>
+        PublishPayloadAsync(topic, [], retain, qualityOfService, cancellationToken);
+
+    public async ValueTask DisposeAsync()
+    {
         try
         {
-            if (!IsConnected)
-            {
-                _logger.LogWarning("Cannot publish message: MQTT client is not connected");
-                return;
-            }
-
-            var json = JsonSerializer.Serialize(message);
-            var payload = Encoding.UTF8.GetBytes(json);
-
-            var mqttMessage = new MqttApplicationMessageBuilder()
-                .WithTopic(topic)
-                .WithPayload(payload)
-                .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                .WithRetainFlag(false)
-                .Build();
-
-            await _mqttClient.PublishAsync(mqttMessage, cancellationToken);
-
-            _logger.LogDebug("Published message to topic {Topic}: {Payload}", topic, json);
+            await DisconnectAsync();
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogError(ex, "Error publishing message to topic {Topic}", topic);
+            _mqttClient.Dispose();
+        }
+    }
+
+    private async Task PublishPayloadAsync(
+        string topic,
+        byte[] payload,
+        bool retain,
+        MqttQualityOfServiceLevel qualityOfService,
+        CancellationToken cancellationToken)
+    {
+        if (!IsConnected)
+        {
+            throw new InvalidOperationException("MQTT client is not connected and subscribed");
+        }
+
+        var message = new MqttApplicationMessageBuilder()
+            .WithTopic(topic)
+            .WithPayload(payload)
+            .WithQualityOfServiceLevel(qualityOfService)
+            .WithRetainFlag(retain)
+            .Build();
+        try
+        {
+            await _mqttClient.PublishAsync(message, cancellationToken);
+        }
+        catch
+        {
+            _isConnected = false;
+            await DisconnectRawClientBestEffortAsync();
             throw;
         }
     }
 
     private async Task SubscribeToTopicsAsync(CancellationToken cancellationToken)
     {
-        _logger.LogTrace("Subscribing to MQTT topics");
-
-        var subscribeOptionsBuilder = new MqttClientSubscribeOptionsBuilder();
-
-        foreach (var handler in _handlers)
+        var builder = new MqttClientSubscribeOptionsBuilder();
+        foreach (IMqttMessageHandler handler in _handlers)
         {
-            subscribeOptionsBuilder.WithTopicFilter(f =>
-                f.WithTopic(handler.Topic)
-                 .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce));
-
-            _logger.LogInformation("Subscribing to topic: {Topic}", handler.Topic);
+            builder.WithTopicFilter(topicFilter => topicFilter
+                .WithTopic(handler.Topic)
+                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce));
         }
 
-        var subscribeOptions = subscribeOptionsBuilder.Build();
-        var result = await _mqttClient.SubscribeAsync(subscribeOptions, cancellationToken);
-
-        foreach (var item in result.Items)
+        MqttClientSubscribeResult result = await _mqttClient.SubscribeAsync(
+            builder.Build(),
+            cancellationToken
+        );
+        MqttClientSubscribeResultItem[] deniedResults = result.Items
+            .Where(subscribeResult => !MqttSubscriptionValidator.AreAllGranted(
+                [subscribeResult.ResultCode]
+            ))
+            .ToArray();
+        if (deniedResults.Length != 0)
         {
-            if (item.ResultCode == MqttClientSubscribeResultCode.GrantedQoS0 ||
-                item.ResultCode == MqttClientSubscribeResultCode.GrantedQoS1 ||
-                item.ResultCode == MqttClientSubscribeResultCode.GrantedQoS2)
-            {
-                _logger.LogInformation("Successfully subscribed to topic: {Topic}", item.TopicFilter.Topic);
-            }
-            else
-            {
-                _logger.LogError("Failed to subscribe to topic {Topic}: {ResultCode}",
-                    item.TopicFilter.Topic, item.ResultCode);
-            }
+            string failures = string.Join(
+                ", ",
+                deniedResults.Select(subscribeResult =>
+                    $"{subscribeResult.TopicFilter.Topic}: {subscribeResult.ResultCode}")
+            );
+            throw new InvalidOperationException($"MQTT subscriptions denied: {failures}");
         }
     }
 
-    private Task OnConnectedAsync(MqttClientConnectedEventArgs args)
+    private Task OnConnectedAsync(MqttClientConnectedEventArgs eventArgs)
     {
-        _logger.LogInformation("MQTT client connected");
-        _isConnected = true;
+        _logger.LogDebug("Raw MQTT transport connected");
         return Task.CompletedTask;
     }
 
-    private Task OnDisconnectedAsync(MqttClientDisconnectedEventArgs args)
+    private Task OnDisconnectedAsync(MqttClientDisconnectedEventArgs eventArgs)
     {
-        _logger.LogWarning("MQTT client disconnected: {Reason}", args.Reason);
         _isConnected = false;
-        
-
+        _logger.LogWarning("MQTT client disconnected: {Reason}", eventArgs.Reason);
         return Task.CompletedTask;
     }
 
-    private async Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs args)
+    private async Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs eventArgs)
     {
-        var topic = args.ApplicationMessage.Topic;
-        _logger.LogDebug("Received message on topic: {Topic}", topic);
+        string topic = eventArgs.ApplicationMessage.Topic;
+        IMqttMessageHandler? handler = _handlers.FirstOrDefault(candidate => candidate.Topic == topic);
+        if (handler == null)
+        {
+            _logger.LogWarning("No MQTT handler is registered for {Topic}", topic);
+            return;
+        }
 
         try
         {
-            // Find the appropriate handler for this topic
-            var handler = _handlers.FirstOrDefault(h => h.Topic == topic);
-            if (handler != null)
-            {
-                await handler.HandleMessageAsync(args.ApplicationMessage, this);
-            }
-            else
-            {
-                _logger.LogWarning("No handler found for topic: {Topic}", topic);
-            }
+            await handler.HandleMessageAsync(eventArgs.ApplicationMessage, this);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            _logger.LogError(ex, "Error processing message from topic {Topic}", topic);
+            _logger.LogError(exception, "Unable to process MQTT message from {Topic}", topic);
         }
     }
 
-    public async ValueTask DisposeAsync()
+    private async Task DisconnectRawClientBestEffortAsync()
     {
-        await DisconnectAsync();
-        _mqttClient.Dispose();
+        if (!_mqttClient.IsConnected)
+        {
+            return;
+        }
+        try
+        {
+            MqttClientDisconnectOptions options = new MqttClientDisconnectOptionsBuilder().Build();
+            await _mqttClient.DisconnectAsync(options, CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Unable to disconnect the raw MQTT transport");
+        }
     }
+
+    private ServerStatusMessage CreateStatus(bool online) => new()
+    {
+        SessionId = _session.Id,
+        StateId = _distanceService.StateId,
+        Online = online,
+    };
 }

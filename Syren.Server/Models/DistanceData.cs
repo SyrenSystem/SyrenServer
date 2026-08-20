@@ -16,12 +16,3 @@ public readonly struct DistanceData
     [JsonPropertyName("distance")]
     public required double Distance { get; init; }
 }
-
-public readonly struct DistancesData
-{
-    /// <summary>
-    /// Array of distances
-    /// </summary>
-    [JsonPropertyName("distances")]
-    public required DistanceData[] Distances { get; init; }
-}

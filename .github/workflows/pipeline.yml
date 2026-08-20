@@ -2,7 +2,7 @@ name: SyrenServer build pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "syren-reality" ]
   pull_request:
     branches: [ "main" ]
 
@@ -19,9 +19,11 @@ jobs:
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
-      run: dotnet build --no-restore
+      run: dotnet build --no-restore --configuration Release
+    - name: Test
+      run: dotnet test --no-build --configuration Release
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: SyrenServer
-        path: ./Syren.Server/bin/Debug/net10.0
+        path: ./Syren.Server/bin/Release/net10.0

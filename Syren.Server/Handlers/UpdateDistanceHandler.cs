@@ -1,25 +1,20 @@
 using System.Text.Json;
-using MQTTnet;
 using Microsoft.Extensions.Options;
+using MQTTnet;
+using MQTTnet.Protocol;
 using Syren.Server.Configuration;
 using Syren.Server.Models;
 using Syren.Server.Services;
-using Syren.Server.Utils;
-using System.Numerics;
 
 namespace Syren.Server.Handlers;
 
-/// <summary>
-/// Handler for sensor data messages from SyrenApp
-/// Topic: SyrenSystem/SyrenApp/UpdateDistance
-/// </summary>
-public class UpdateDistanceHandler : IMqttMessageHandler
+public sealed class UpdateDistanceHandler : IMqttMessageHandler
 {
+    private readonly object _availabilityLock = new();
     private readonly IDistanceService _distanceService;
     private readonly MqttOptions _mqttOptions;
     private readonly ILogger<UpdateDistanceHandler> _logger;
-
-    public string Topic { get; }
+    private bool _positionWasAvailable;
 
     public UpdateDistanceHandler(
         IDistanceService distanceService,
@@ -32,51 +27,65 @@ public class UpdateDistanceHandler : IMqttMessageHandler
         Topic = _mqttOptions.UpdateDistanceTopic;
     }
 
-    public async Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
+    public string Topic { get; }
+
+    public async Task HandleMessageAsync(
+        MqttApplicationMessage message,
+        IMqttClientService client,
+        CancellationToken cancellationToken = default)
     {
-        var payload = PayloadUtils.GetPayloadAsString(message.Payload);
-        _logger.LogDebug("Received UpdateDistance data:\n{Payload}\n", payload);
-        
         try
         {
-            
-            var distanceData = JsonSerializer.Deserialize<DistanceData>(payload);
-            await _distanceService.UpdateDistanceAsync(distanceData);
+            DistanceData data = JsonSerializer.Deserialize<DistanceData>(
+                message.ConvertPayloadToString()
+            );
+            if (string.IsNullOrWhiteSpace(data.SpeakerId) ||
+                !double.IsFinite(data.Distance) ||
+                data.Distance < 0)
+            {
+                _logger.LogWarning("Dropping invalid distance payload from {Topic}", message.Topic);
+                return;
+            }
 
-            Vector3? userPosition = _distanceService.GetUserPosition();
-            if (userPosition.HasValue) {
-                await PublishUserPosition(userPosition.Value, client);
+            await _distanceService.UpdateDistanceAsync(data, cancellationToken);
+            System.Numerics.Vector3? position = _distanceService.GetUserPosition();
+            if (position.HasValue)
+            {
+                lock (_availabilityLock)
+                {
+                    _positionWasAvailable = true;
+                }
+                await client.PublishAsync(
+                    _mqttOptions.GetUserPositionTopic,
+                    new UserPosition { Position = PositionVector.FromVector3(position.Value) },
+                    qualityOfService: MqttQualityOfServiceLevel.AtMostOnce,
+                    cancellationToken: cancellationToken
+                );
+                return;
+            }
+
+            bool clearPosition;
+            lock (_availabilityLock)
+            {
+                clearPosition = _positionWasAvailable;
+                _positionWasAvailable = false;
+            }
+            if (clearPosition)
+            {
+                await client.PublishEmptyAsync(
+                    _mqttOptions.GetUserPositionTopic,
+                    qualityOfService: MqttQualityOfServiceLevel.AtMostOnce,
+                    cancellationToken: cancellationToken
+                );
             }
         }
-        catch (JsonException ex)
+        catch (JsonException exception)
         {
-            _logger.LogError(ex, "Failed to parse distance data from topic {Topic}. Payload:\n{Payload}\n",
-                message.Topic, payload);
+            _logger.LogWarning(exception, "Dropping malformed distance payload from {Topic}", message.Topic);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            _logger.LogError(ex, "Error handling distance data from topic {Topic}", message.Topic);
-        }
-    }
-
-    private async Task PublishUserPosition(Vector3 position, IMqttClientService client)
-    {
-        var userPosition = new UserPosition
-        {
-            Position = new PositionVector{
-                X = position.X,
-                Y = position.Y,
-                Z = position.Z,
-            },
-        };
-
-        try
-        {
-            await client.PublishAsync(_mqttOptions.GetUserPositionTopic, userPosition);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to publish new user position");
+            _logger.LogError(exception, "Unable to process distance from {Topic}", message.Topic);
         }
     }
 }

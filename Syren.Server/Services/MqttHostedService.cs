@@ -1,36 +1,38 @@
 using Microsoft.Extensions.Options;
 using Syren.Server.Configuration;
+using Syren.Server.Models;
 
 namespace Syren.Server.Services;
 
-/// <summary>
-/// Hosted service that manages the MQTT client lifecycle
-/// </summary>
-public class MqttHostedService : IHostedService
+public sealed class MqttHostedService : IHostedService
 {
     private readonly IMqttClientService _mqttClientService;
+    private readonly IDistanceService _distanceService;
     private readonly MqttOptions _options;
+    private readonly ServerSession _session;
     private readonly ILogger<MqttHostedService> _logger;
     private CancellationTokenSource? _retryCancellationTokenSource;
     private Task? _retryTask;
 
     public MqttHostedService(
         IMqttClientService mqttClientService,
+        IDistanceService distanceService,
         IOptions<MqttOptions> options,
+        ServerSession session,
         ILogger<MqttHostedService> logger)
     {
         _mqttClientService = mqttClientService;
+        _distanceService = distanceService;
         _options = options.Value;
+        _session = session;
         _logger = logger;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("MQTT Hosted Service starting");
-
         if (!_options.AutoReconnect)
         {
-            await _mqttClientService.ConnectAsync(cancellationToken);
+            await ConnectAndSynchronizeAsync(cancellationToken);
             return;
         }
 
@@ -40,13 +42,10 @@ public class MqttHostedService : IHostedService
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("MQTT Hosted Service stopping");
-
         if (_retryCancellationTokenSource != null)
         {
             await _retryCancellationTokenSource.CancelAsync();
         }
-
         if (_retryTask != null)
         {
             try
@@ -55,18 +54,27 @@ public class MqttHostedService : IHostedService
             }
             catch (OperationCanceledException)
             {
-                _logger.LogDebug("MQTT connection loop stopped");
+                _logger.LogDebug("MQTT retry loop stopped");
             }
         }
 
-        try
+        if (_mqttClientService.IsConnected)
         {
-            await _mqttClientService.DisconnectAsync(cancellationToken);
+            try
+            {
+                await _mqttClientService.PublishAsync(
+                    _options.ServerStatusTopic,
+                    CreateStatus(online: false, []),
+                    retain: true,
+                    cancellationToken: cancellationToken
+                );
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(exception, "Unable to publish offline server status");
+            }
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error stopping MQTT service");
-        }
+        await _mqttClientService.DisconnectAsync(cancellationToken);
     }
 
     private async Task RunConnectionLoopAsync(CancellationToken cancellationToken)
@@ -77,7 +85,7 @@ public class MqttHostedService : IHostedService
             {
                 try
                 {
-                    await _mqttClientService.ConnectAsync(cancellationToken);
+                    await ConnectAndSynchronizeAsync(cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -85,7 +93,7 @@ public class MqttHostedService : IHostedService
                 }
                 catch (Exception exception)
                 {
-                    _logger.LogError(exception, "MQTT connection attempt failed");
+                    _logger.LogError(exception, "MQTT connection or state synchronization failed");
                 }
             }
 
@@ -102,4 +110,74 @@ public class MqttHostedService : IHostedService
             }
         }
     }
+
+    private async Task ConnectAndSynchronizeAsync(CancellationToken cancellationToken)
+    {
+        await _mqttClientService.ConnectAsync(cancellationToken);
+        try
+        {
+            await SynchronizeBrokerStateAsync(cancellationToken);
+        }
+        catch
+        {
+            await _mqttClientService.DisconnectAsync(CancellationToken.None);
+            throw;
+        }
+    }
+
+    private async Task SynchronizeBrokerStateAsync(CancellationToken cancellationToken)
+    {
+        IReadOnlyList<SpeakerPosition> activePositions =
+            await _distanceService.GetConnectedSpeakerPositionsAsync(cancellationToken);
+        IReadOnlyList<string> configuredIds =
+            await _distanceService.GetConfiguredSpeakerIdsAsync(cancellationToken);
+        IReadOnlyList<string> retiredIds =
+            await _distanceService.GetRetiredSpeakerIdsAsync(cancellationToken);
+        var activeIds = activePositions
+            .Select(position => position.SpeakerId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string sensorId in configuredIds.Where(sensorId => !activeIds.Contains(sensorId)))
+        {
+            await _mqttClientService.ClearRetainedAsync(
+                $"{_options.GetSpeakerPositionTopic}/{sensorId}",
+                cancellationToken
+            );
+        }
+        foreach (string sensorId in retiredIds)
+        {
+            await _mqttClientService.ClearRetainedAsync(
+                $"{_options.GetSpeakerPositionTopic}/{sensorId}",
+                cancellationToken
+            );
+        }
+        foreach (SpeakerPosition position in activePositions)
+        {
+            await _mqttClientService.PublishAsync(
+                $"{_options.GetSpeakerPositionTopic}/{position.SpeakerId}",
+                position,
+                retain: true,
+                cancellationToken: cancellationToken
+            );
+        }
+
+        await _distanceService.ConfirmRetiredSpeakerIdsClearedAsync(
+            retiredIds,
+            cancellationToken
+        );
+        await _mqttClientService.PublishAsync(
+            _options.ServerStatusTopic,
+            CreateStatus(online: true, activeIds.Order().ToArray()),
+            retain: true,
+            cancellationToken: cancellationToken
+        );
+    }
+
+    private ServerStatusMessage CreateStatus(bool online, string[] connectedSpeakerIds) => new()
+    {
+        SessionId = _session.Id,
+        StateId = _distanceService.StateId,
+        Online = online,
+        ConnectedSpeakerIds = connectedSpeakerIds,
+    };
 }

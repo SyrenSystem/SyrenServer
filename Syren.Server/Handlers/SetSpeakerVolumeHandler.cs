@@ -1,24 +1,16 @@
 using System.Text.Json;
-using MQTTnet;
 using Microsoft.Extensions.Options;
+using MQTTnet;
 using Syren.Server.Configuration;
 using Syren.Server.Models;
 using Syren.Server.Services;
-using Syren.Server.Utils;
 
 namespace Syren.Server.Handlers;
 
-/// <summary>
-/// Handler for speaker volume setting requests from SyrenApp
-/// Topic: SyrenSystem/SyrenApp/SetSpeakerVolume
-/// </summary>
-public class SetSpeakerVolumeHandler : IMqttMessageHandler
+public sealed class SetSpeakerVolumeHandler : IMqttMessageHandler
 {
     private readonly IDistanceService _distanceService;
-    private readonly MqttOptions _mqttOptions;
     private readonly ILogger<SetSpeakerVolumeHandler> _logger;
-
-    public string Topic { get; }
 
     public SetSpeakerVolumeHandler(
         IDistanceService distanceService,
@@ -26,36 +18,42 @@ public class SetSpeakerVolumeHandler : IMqttMessageHandler
         ILogger<SetSpeakerVolumeHandler> logger)
     {
         _distanceService = distanceService;
-        _mqttOptions = mqttOptions.Value;
         _logger = logger;
-        Topic = _mqttOptions.SetSpeakerVolumeTopic;
+        Topic = mqttOptions.Value.SetSpeakerVolumeTopic;
     }
 
-    public async Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
+    public string Topic { get; }
+
+    public async Task HandleMessageAsync(
+        MqttApplicationMessage message,
+        IMqttClientService client,
+        CancellationToken cancellationToken = default)
     {
-        var payload = PayloadUtils.GetPayloadAsString(message.Payload);
-        _logger.LogDebug("Received SetSpeakerVolume data:\n{Payload}\n", payload);
-        
         try
         {
-            var speakerVolumeData = JsonSerializer.Deserialize<SetSpeakerVolumeData>(payload);
-
-            if (speakerVolumeData.Volume < 0.0)
+            SetSpeakerVolumeData data = JsonSerializer.Deserialize<SetSpeakerVolumeData>(
+                message.ConvertPayloadToString()
+            );
+            if (string.IsNullOrWhiteSpace(data.SensorId) ||
+                !double.IsFinite(data.Volume) ||
+                data.Volume is < 0 or > 100)
             {
-                _logger.LogError("Cannot set volume to a value {Volume} < 0", speakerVolumeData.Volume);
+                _logger.LogWarning("Dropping invalid volume payload from {Topic}", message.Topic);
                 return;
             }
-
-            await _distanceService.SetSpeakerVolumeAsync(speakerVolumeData.SensorId, speakerVolumeData.Volume);
+            await _distanceService.SetSpeakerVolumeAsync(
+                data.SensorId,
+                data.Volume,
+                cancellationToken
+            );
         }
-        catch (JsonException ex)
+        catch (JsonException exception)
         {
-            _logger.LogError(ex, "Failed to parse sensor data from topic {Topic}. Payload:\n{Payload}\n",
-                message.Topic, payload);
+            _logger.LogWarning(exception, "Dropping malformed volume payload from {Topic}", message.Topic);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            _logger.LogError(ex, "Error handling sensor data from topic {Topic}", message.Topic);
+            _logger.LogError(exception, "Unable to set speaker volume from {Topic}", message.Topic);
         }
     }
 }

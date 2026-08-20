@@ -9,4 +9,7 @@ public readonly struct ConnectSpeakerData
     /// <summary>
     [JsonPropertyName("id")]
     public required string SensorId { get; init; }
+
+    [JsonPropertyName("volume")]
+    public required double Volume { get; init; }
 }

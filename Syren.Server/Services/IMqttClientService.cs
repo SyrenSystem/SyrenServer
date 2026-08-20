@@ -22,7 +22,22 @@ public interface IMqttClientService
     /// <param name="topic">MQTT topic</param>
     /// <param name="message">Message payload</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    Task PublishAsync<T>(string topic, T message, CancellationToken cancellationToken = default);
+    Task PublishAsync<T>(
+        string topic,
+        T message,
+        bool retain = false,
+        MQTTnet.Protocol.MqttQualityOfServiceLevel qualityOfService = MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce,
+        CancellationToken cancellationToken = default
+    );
+
+    Task ClearRetainedAsync(string topic, CancellationToken cancellationToken = default);
+
+    Task PublishEmptyAsync(
+        string topic,
+        bool retain = false,
+        MQTTnet.Protocol.MqttQualityOfServiceLevel qualityOfService = MQTTnet.Protocol.MqttQualityOfServiceLevel.AtMostOnce,
+        CancellationToken cancellationToken = default
+    );
 
     /// <summary>
     /// Check if the client is connected

@@ -1,0 +1,27 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.22
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  snapserver:
+    build:
+      context: ./deploy/snapserver
+    network_mode: host
+    restart: unless-stopped
+
+  syren-server:
+    build:
+      context: .
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+      - snapserver
+    volumes:
+      - syren-server-state:/var/lib/syren-server
+
+volumes:
+  syren-server-state:

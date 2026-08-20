@@ -13,4 +13,6 @@ public class SnapCastOptions
     /// SnapServer HTTP port (default: 1780)
     /// </summary>
     public int HttpPort { get; set; } = 1780;
+
+    public int RequestTimeoutSeconds { get; set; } = 3;
 }

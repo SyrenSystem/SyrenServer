@@ -1,24 +1,17 @@
-using MQTTnet;
-using Microsoft.Extensions.Options;
-using Syren.Server.Configuration;
-using Syren.Server.Services;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
+using MQTTnet;
+using Syren.Server.Configuration;
 using Syren.Server.Models;
-using Syren.Server.Utils;
+using Syren.Server.Services;
 
 namespace Syren.Server.Handlers;
 
-/// <summary>
-/// Handler for sensor data messages from SyrenApp
-/// Topic: SyrenSystem/SyrenApp/DisconnectSpeaker
-/// </summary>
-public class DisconnectSpeakerHandler : IMqttMessageHandler
+public sealed class DisconnectSpeakerHandler : IMqttMessageHandler
 {
     private readonly IDistanceService _distanceService;
     private readonly MqttOptions _mqttOptions;
     private readonly ILogger<DisconnectSpeakerHandler> _logger;
-
-    public string Topic { get; }
 
     public DisconnectSpeakerHandler(
         IDistanceService distanceService,
@@ -31,25 +24,44 @@ public class DisconnectSpeakerHandler : IMqttMessageHandler
         Topic = _mqttOptions.DisconnectSpeakerTopic;
     }
 
-    public async Task HandleMessageAsync(MqttApplicationMessage message, IMqttClientService client, CancellationToken cancellationToken = default)
-    {
-        var payload = PayloadUtils.GetPayloadAsString(message.Payload);
-        _logger.LogDebug("Received speaker removal request:\n{Payload}\n", payload);
+    public string Topic { get; }
 
+    public async Task HandleMessageAsync(
+        MqttApplicationMessage message,
+        IMqttClientService client,
+        CancellationToken cancellationToken = default)
+    {
         try
         {
-            var disconnectSpeakerData = JsonSerializer.Deserialize<DisconnectSpeakerData>(payload);
+            DisconnectSpeakerData data = JsonSerializer.Deserialize<DisconnectSpeakerData>(
+                message.ConvertPayloadToString()
+            );
+            if (string.IsNullOrWhiteSpace(data.SensorId))
+            {
+                _logger.LogWarning("Dropping disconnect payload without an ID");
+                return;
+            }
 
-            await _distanceService.DisconnectSpeakerAsync(disconnectSpeakerData.SensorId);
+            string sensorId = data.SensorId.ToLowerInvariant();
+            DisconnectResult result = await _distanceService.DisconnectSpeakerAsync(
+                sensorId,
+                cancellationToken
+            );
+            if (result != DisconnectResult.UnknownSensor)
+            {
+                await client.ClearRetainedAsync(
+                    $"{_mqttOptions.GetSpeakerPositionTopic}/{sensorId}",
+                    cancellationToken
+                );
+            }
         }
-        catch (JsonException ex)
+        catch (JsonException exception)
         {
-            _logger.LogError(ex, "Failed to parse 'disconnect speaker' data from topic {Topic}. Payload:\n{Payload}\n",
-                message.Topic, payload);
+            _logger.LogWarning(exception, "Dropping malformed disconnect payload from {Topic}", message.Topic);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            _logger.LogError(ex, "Error handling disconnect speaker request from topic {Topic}", message.Topic);
+            _logger.LogError(exception, "Unable to disconnect speaker from {Topic}", message.Topic);
         }
     }
 }

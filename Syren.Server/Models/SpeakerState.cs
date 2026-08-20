@@ -10,4 +10,6 @@ public sealed record SpeakerState
     public Vector3 Position;
 
     public double Volume;
+
+    public int? LastSentVolume;
 }
