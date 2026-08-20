@@ -96,6 +96,53 @@ public sealed class DistanceServiceTests
     }
 
     [Fact]
+    public async Task ThirdSpeakerConnectIsRejectedWhenGeometryIsDegenerate()
+    {
+        var snapCastService = new RecordingSnapCastService();
+        DistanceService service = TestServices.CreateDistanceService(
+            snapCastService,
+            null,
+            Speaker("one", "client-one"),
+            Speaker("two", "client-two"),
+            Speaker("three", "client-three")
+        );
+        await service.ConnectSpeakerAsync("one", 20);
+        await service.ConnectSpeakerAsync("two", 20);
+        await service.UpdateDistanceAsync(new DistanceData { SpeakerId = "one", Distance = 50 });
+        await service.UpdateDistanceAsync(new DistanceData { SpeakerId = "two", Distance = 50 });
+
+        SpeakerState? third = await service.ConnectSpeakerAsync("three", 20);
+
+        Assert.Null(third);
+        Assert.Equal(2, (await service.GetConnectedSpeakerPositionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task ThirdSpeakerPlacementIsFinite()
+    {
+        var snapCastService = new RecordingSnapCastService();
+        DistanceService service = TestServices.CreateDistanceService(
+            snapCastService,
+            null,
+            Speaker("one", "client-one"),
+            Speaker("two", "client-two"),
+            Speaker("three", "client-three")
+        );
+        await service.ConnectSpeakerAsync("one", 20);
+        await service.UpdateDistanceAsync(new DistanceData { SpeakerId = "one", Distance = 100 });
+        await service.ConnectSpeakerAsync("two", 20);
+        await service.UpdateDistanceAsync(new DistanceData { SpeakerId = "one", Distance = 80 });
+        await service.UpdateDistanceAsync(new DistanceData { SpeakerId = "two", Distance = 60 });
+
+        SpeakerState? third = await service.ConnectSpeakerAsync("three", 20);
+
+        SpeakerState state = Assert.IsType<SpeakerState>(third);
+        Assert.True(float.IsFinite(state.Position.X));
+        Assert.True(float.IsFinite(state.Position.Y));
+        Assert.True(float.IsFinite(state.Position.Z));
+    }
+
+    [Fact]
     public void SpeakersOptionsRejectSwappedDistances()
     {
         var options = new SpeakersOptions

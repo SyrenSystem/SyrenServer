@@ -50,4 +50,51 @@ public sealed class HandlerTests
 
         Assert.Contains("SyrenSystem/SyrenServer/GetSpeakerPosition/sensor", client.Cleared);
     }
+
+    [Fact]
+    public async Task HandlersDropInvalidDistanceAndVolumeValues()
+    {
+        var snapCastService = new RecordingSnapCastService();
+        var distanceService = TestServices.CreateDistanceService(snapCastService);
+        var client = new FakeMqttClientService();
+        var options = Options.Create(new MqttOptions());
+        var connectHandler = new ConnectSpeakerHandler(
+            distanceService,
+            options,
+            NullLogger<ConnectSpeakerHandler>.Instance
+        );
+        var distanceHandler = new UpdateDistanceHandler(
+            distanceService,
+            options,
+            NullLogger<UpdateDistanceHandler>.Instance
+        );
+        var volumeHandler = new SetSpeakerVolumeHandler(
+            distanceService,
+            options,
+            NullLogger<SetSpeakerVolumeHandler>.Instance
+        );
+
+        await connectHandler.HandleMessageAsync(
+            Message(connectHandler.Topic, """{"id":"sensor","volume":101}"""),
+            client
+        );
+        await distanceHandler.HandleMessageAsync(
+            Message(distanceHandler.Topic, """{"id":"sensor","distance":-1}"""),
+            client
+        );
+        await volumeHandler.HandleMessageAsync(
+            Message(volumeHandler.Topic, """{"id":"sensor","volume":-1}"""),
+            client
+        );
+
+        Assert.Empty(client.Published);
+        Assert.Empty(snapCastService.VolumeChanges);
+        Assert.Empty(await distanceService.GetConnectedSpeakerPositionsAsync());
+    }
+
+    private static MqttApplicationMessage Message(string topic, string payload) =>
+        new MqttApplicationMessageBuilder()
+            .WithTopic(topic)
+            .WithPayload(payload)
+            .Build();
 }
