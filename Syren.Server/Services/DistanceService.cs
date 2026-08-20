@@ -11,18 +11,14 @@ public class DistanceService : IDistanceService, IHostedService
     private readonly Dictionary<string, Speaker> _speakers = [];
     private readonly Dictionary<string, SpeakerState> _speakerStates = [];
 
-    private readonly SyrenSettings _syrenSettings;
-
     private readonly ISnapCastService _snapCastService;
     private readonly ILogger<DistanceService> _logger;
 
     public DistanceService(
-        IOptions<SyrenSettings> syrenSettings,
         IOptions<SpeakersOptions> speakersOptions,
         ISnapCastService snapCastService,
         ILogger<DistanceService> logger)
     {
-        _syrenSettings = syrenSettings.Value;
         _snapCastService = snapCastService;
         _logger = logger;
 
@@ -80,8 +76,7 @@ public class DistanceService : IDistanceService, IHostedService
         }
 
         SpeakerState state = _speakerStates[speakerId];
-        state.Distance = distance.Distance * _syrenSettings.DistanceSmoothingFactor
-            + state.Distance * (1.0 - _syrenSettings.DistanceSmoothingFactor);
+        state.Distance = distance.Distance;
 
         double distanceVolumeModifier = GetDistanceVolumeModifier(speakerId, state.Distance);
         double volume = state.Volume * distanceVolumeModifier;

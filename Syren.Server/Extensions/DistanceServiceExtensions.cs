@@ -9,7 +9,6 @@ public static class DistanceServiceExtensions
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        services.Configure<SyrenSettings>(configuration.GetSection(SyrenSettings.SectionName));
         services.Configure<SpeakersOptions>(configuration.GetSection(SpeakersOptions.SectionName));
 
         services.AddSingleton<DistanceService>();

@@ -140,7 +140,7 @@ public class RegressionTests
     }
 
     [Fact]
-    public async Task DistanceServiceUsesTheSmoothedDistanceForVolume()
+    public async Task DistanceServiceUsesTheLatestDistanceForVolume()
     {
         var snapCastService = new RecordingSnapCastService();
         DistanceService distanceService = CreateDistanceService(snapCastService);
@@ -153,7 +153,7 @@ public class RegressionTests
             Distance = 100,
         });
 
-        Assert.Equal(("snap-client", 50), snapCastService.VolumeChanges.Last());
+        Assert.Equal(("snap-client", 0), snapCastService.VolumeChanges.Last());
     }
 
     [Fact]
@@ -169,10 +169,6 @@ public class RegressionTests
 
     private static DistanceService CreateDistanceService(ISnapCastService snapCastService)
     {
-        var syrenSettings = Options.Create(new SyrenSettings
-        {
-            DistanceSmoothingFactor = 0.5,
-        });
         var speakersOptions = Options.Create(new SpeakersOptions
         {
             SpeakersInfo =
@@ -188,7 +184,6 @@ public class RegressionTests
         });
 
         return new DistanceService(
-            syrenSettings,
             speakersOptions,
             snapCastService,
             NullLogger<DistanceService>.Instance
