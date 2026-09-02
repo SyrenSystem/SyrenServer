@@ -13,6 +13,8 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+RUN install -d -o _snapserver -g _snapserver -m 750 /var/lib/snapserver
+
 COPY --from=librespot-builder /usr/local/cargo/bin/librespot /usr/local/bin/librespot
 COPY snapserver.conf /etc/snapserver.conf
 COPY --chmod=755 start-snapserver.sh /usr/local/bin/start-snapserver

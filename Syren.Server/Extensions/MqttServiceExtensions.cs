@@ -28,8 +28,20 @@ public static class MqttServiceExtensions
         services.AddSingleton<IMqttMessageHandler, SetSpeakerVolumeHandler>();
         services.AddSingleton<IMqttMessageHandler, ConnectSpeakerHandler>();
         services.AddSingleton<IMqttMessageHandler, DisconnectSpeakerHandler>();
+        services.AddSingleton<IMqttMessageHandler, ConfigureSpeakerHandler>();
+        services.AddSingleton<IMqttMessageHandler, DeleteSpeakerHandler>();
+        services.AddSingleton<IMqttMessageHandler, UpsertGroupHandler>();
+        services.AddSingleton<IMqttMessageHandler, DeleteGroupHandler>();
+        services.AddSingleton<IMqttMessageHandler, SetSpeakerLevelHandler>();
 
-        // Register hosted service for MQTT lifecycle management
+        // Register the publisher before the MQTT lifecycle service so it is started first
+        services.AddSingleton<ConfigurationPublisher>();
+        services.AddSingleton<IConfigurationPublisher>(serviceProvider =>
+            serviceProvider.GetRequiredService<ConfigurationPublisher>()
+        );
+        services.AddSingleton<IHostedService>(serviceProvider =>
+            serviceProvider.GetRequiredService<ConfigurationPublisher>()
+        );
         services.AddHostedService<MqttHostedService>();
 
         return services;

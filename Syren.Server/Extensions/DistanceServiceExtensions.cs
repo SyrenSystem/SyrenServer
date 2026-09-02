@@ -18,6 +18,10 @@ public static class DistanceServiceExtensions
             .Bind(configuration.GetSection(StateOptions.SectionName))
             .ValidateOnStart();
         services.AddSingleton<IValidateOptions<StateOptions>, StateOptionsValidator>();
+        services.AddOptions<PlaybackOptions>()
+            .Bind(configuration.GetSection(PlaybackOptions.SectionName))
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<PlaybackOptions>, PlaybackOptionsValidator>();
         services.AddSingleton<ISystemStateStore, SystemStateStore>();
 
         services.AddSingleton<DistanceService>();
@@ -26,6 +30,13 @@ public static class DistanceServiceExtensions
         );
         services.AddSingleton<IHostedService>(serviceProvider =>
             serviceProvider.GetRequiredService<DistanceService>()
+        );
+        services.AddSingleton<SystemConfigurationService>();
+        services.AddSingleton<ISystemConfigurationService>(serviceProvider =>
+            serviceProvider.GetRequiredService<SystemConfigurationService>()
+        );
+        services.AddSingleton<IHostedService>(serviceProvider =>
+            serviceProvider.GetRequiredService<SystemConfigurationService>()
         );
 
         return services;

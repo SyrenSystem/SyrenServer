@@ -1,0 +1,17 @@
+[Unit]
+Description=SyrenSystem server stack
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__SERVER_DIRECTORY__
+ExecStart=/usr/bin/podman-compose -f __COMPOSE_FILE__ up --no-build
+ExecStop=/usr/bin/podman-compose -f __COMPOSE_FILE__ down
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=0
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

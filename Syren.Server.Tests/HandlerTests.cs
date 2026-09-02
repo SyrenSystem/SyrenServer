@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using MQTTnet;
 using Syren.Server.Configuration;
 using Syren.Server.Handlers;
+using Syren.Server.Models;
 using Syren.Server.Services;
 using Xunit;
 
@@ -20,13 +21,47 @@ public sealed class HandlerTests
             Options.Create(new MqttOptions()),
             NullLogger<ConnectSpeakerHandler>.Instance
         );
-        MqttApplicationMessage message = new MqttApplicationMessageBuilder()
-            .WithTopic(handler.Topic)
-            .WithPayload("""{"id":"sensor","volume":25}""")
-            .Build();
 
-        await handler.HandleMessageAsync(message, client);
+        await handler.HandleMessageAsync(Message(handler.Topic, """{"id":"sensor","volume":25}"""), client);
 
+        Assert.Contains(client.Published, publish =>
+            publish.Topic.EndsWith("/sensor") && publish.Retain);
+    }
+
+    [Fact]
+    public async Task ConnectWithoutVolumeKeepsStoredLevel()
+    {
+        var stateStore = new MemoryStateStore(new PersistentSystemState
+        {
+            StateId = Guid.NewGuid().ToString(),
+            Speakers =
+            [
+                new PersistentSpeakerState
+                {
+                    SpeakerId = "sensor",
+                    Name = "Sensor",
+                    SensorId = "sensor",
+                    SnapClientId = "snap-client",
+                    FullVolumeDistance = 0,
+                    MuteDistance = 100,
+                    Connected = false,
+                    Volume = 35,
+                },
+            ],
+        });
+        var snapCastService = new RecordingSnapCastService();
+        var distanceService = TestServices.CreateDistanceService(snapCastService, stateStore);
+        var client = new FakeMqttClientService();
+        var handler = new ConnectSpeakerHandler(
+            distanceService,
+            Options.Create(new MqttOptions()),
+            NullLogger<ConnectSpeakerHandler>.Instance
+        );
+
+        await handler.HandleMessageAsync(Message(handler.Topic, """{"id":"sensor"}"""), client);
+
+        Assert.Equal(("snap-client", 35), Assert.Single(snapCastService.VolumeChanges));
+        Assert.Equal(35, stateStore.Current.Speakers.Single().Volume);
         Assert.Contains(client.Published, publish =>
             publish.Topic.EndsWith("/sensor") && publish.Retain);
     }
@@ -41,12 +76,8 @@ public sealed class HandlerTests
             Options.Create(new MqttOptions()),
             NullLogger<DisconnectSpeakerHandler>.Instance
         );
-        MqttApplicationMessage message = new MqttApplicationMessageBuilder()
-            .WithTopic(handler.Topic)
-            .WithPayload("""{"id":"sensor"}""")
-            .Build();
 
-        await handler.HandleMessageAsync(message, client);
+        await handler.HandleMessageAsync(Message(handler.Topic, """{"id":"sensor"}"""), client);
 
         Assert.Contains("SyrenSystem/SyrenServer/GetSpeakerPosition/sensor", client.Cleared);
     }
@@ -90,6 +121,53 @@ public sealed class HandlerTests
         Assert.Empty(client.Published);
         Assert.Empty(snapCastService.VolumeChanges);
         Assert.Empty(await distanceService.GetConnectedSpeakerPositionsAsync());
+    }
+
+    [Fact]
+    public async Task ConfigurationHandlerPublishesResultOnly()
+    {
+        var stateStore = new MemoryStateStore(new PersistentSystemState
+        {
+            StateId = "state",
+            Revision = 2,
+            Speakers =
+            [
+                new PersistentSpeakerState
+                {
+                    SpeakerId = "speaker-one",
+                    Name = "Kitchen speaker",
+                    SnapClientId = "snap-one",
+                    Connected = false,
+                    Volume = 100,
+                },
+            ],
+        });
+        SystemConfigurationService configurationService = TestServices.CreateConfigurationService(
+            stateStore,
+            new RecordingDistanceService(stateStore),
+            new RecordingSnapCastService()
+        );
+        var client = new FakeMqttClientService();
+        var handler = new SetSpeakerLevelHandler(
+            configurationService,
+            Options.Create(new MqttOptions()),
+            NullLogger<SetSpeakerLevelHandler>.Instance
+        );
+
+        await handler.HandleMessageAsync(
+            Message(
+                handler.Topic,
+                """{"requestId":"request","expectedRevision":2,"speakerId":"speaker-one","level":30}"""
+            ),
+            client
+        );
+
+        var published = Assert.Single(client.Published);
+        Assert.Equal("SyrenSystem/SyrenServer/CommandResult/request", published.Topic);
+        var result = Assert.IsType<CommandResultMessage>(published.Message);
+        Assert.True(result.Success);
+        Assert.Equal(3, result.Revision);
+        Assert.Equal(30, stateStore.Current.Speakers.Single().Volume);
     }
 
     private static MqttApplicationMessage Message(string topic, string payload) =>

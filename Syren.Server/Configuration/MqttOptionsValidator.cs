@@ -17,6 +17,14 @@ public sealed class MqttOptionsValidator : IValidateOptions<MqttOptions>
             options.GetSpeakerPositionTopic,
             options.GetUserPositionTopic,
             options.ServerStatusTopic,
+            options.ConfigurationTopic,
+            options.RuntimeTopic,
+            options.CommandResultTopic,
+            options.ConfigureSpeakerTopic,
+            options.DeleteSpeakerTopic,
+            options.UpsertGroupTopic,
+            options.DeleteGroupTopic,
+            options.SetSpeakerLevelTopic,
         ];
         if (requiredValues.Any(string.IsNullOrWhiteSpace))
         {

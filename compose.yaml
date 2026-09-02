@@ -11,6 +11,8 @@ services:
       context: ./deploy/snapserver
     network_mode: host
     restart: unless-stopped
+    volumes:
+      - snapserver-data:/var/lib/snapserver
 
   syren-server:
     build:
@@ -25,3 +27,4 @@ services:
 
 volumes:
   syren-server-state:
+  snapserver-data:

@@ -36,8 +36,8 @@ public sealed class ConnectSpeakerHandler : IMqttMessageHandler
         {
             ConnectSpeakerData data = JsonSerializer.Deserialize<ConnectSpeakerData>(payload);
             if (string.IsNullOrWhiteSpace(data.SensorId) ||
-                !double.IsFinite(data.Volume) ||
-                data.Volume is < 0 or > 100)
+                (data.Volume.HasValue &&
+                    (!double.IsFinite(data.Volume.Value) || data.Volume.Value is < 0 or > 100)))
             {
                 _logger.LogWarning("Dropping invalid connect payload from {Topic}", message.Topic);
                 return;
@@ -55,11 +55,11 @@ public sealed class ConnectSpeakerHandler : IMqttMessageHandler
 
             var position = new SpeakerPosition
             {
-                SpeakerId = state.Speaker.SensorId,
+                SpeakerId = state.Speaker.SensorId!,
                 Position = PositionVector.FromVector3(state.Position),
             };
             await client.PublishAsync(
-                $"{_mqttOptions.GetSpeakerPositionTopic}/{state.Speaker.SensorId}",
+                $"{_mqttOptions.GetSpeakerPositionTopic}/{state.Speaker.SensorId!}",
                 position,
                 retain: true,
                 cancellationToken: cancellationToken

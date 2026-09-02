@@ -8,6 +8,7 @@ public sealed class MqttHostedService : IHostedService
 {
     private readonly IMqttClientService _mqttClientService;
     private readonly IDistanceService _distanceService;
+    private readonly IConfigurationPublisher _publisher;
     private readonly MqttOptions _options;
     private readonly ServerSession _session;
     private readonly ILogger<MqttHostedService> _logger;
@@ -17,12 +18,14 @@ public sealed class MqttHostedService : IHostedService
     public MqttHostedService(
         IMqttClientService mqttClientService,
         IDistanceService distanceService,
+        IConfigurationPublisher publisher,
         IOptions<MqttOptions> options,
         ServerSession session,
         ILogger<MqttHostedService> logger)
     {
         _mqttClientService = mqttClientService;
         _distanceService = distanceService;
+        _publisher = publisher;
         _options = options.Value;
         _session = session;
         _logger = logger;
@@ -64,7 +67,7 @@ public sealed class MqttHostedService : IHostedService
             {
                 await _mqttClientService.PublishAsync(
                     _options.ServerStatusTopic,
-                    CreateStatus(online: false, []),
+                    ServerStatusMessage.Create(_session.Id, _distanceService.StateId, online: false, []),
                     retain: true,
                     cancellationToken: cancellationToken
                 );
@@ -131,8 +134,6 @@ public sealed class MqttHostedService : IHostedService
             await _distanceService.GetConnectedSpeakerPositionsAsync(cancellationToken);
         IReadOnlyList<string> configuredIds =
             await _distanceService.GetConfiguredSpeakerIdsAsync(cancellationToken);
-        IReadOnlyList<string> retiredIds =
-            await _distanceService.GetRetiredSpeakerIdsAsync(cancellationToken);
         var activeIds = activePositions
             .Select(position => position.SpeakerId)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -144,13 +145,7 @@ public sealed class MqttHostedService : IHostedService
                 cancellationToken
             );
         }
-        foreach (string sensorId in retiredIds)
-        {
-            await _mqttClientService.ClearRetainedAsync(
-                $"{_options.GetSpeakerPositionTopic}/{sensorId}",
-                cancellationToken
-            );
-        }
+        await _publisher.ClearRetiredPositionsAsync(cancellationToken);
         foreach (SpeakerPosition position in activePositions)
         {
             await _mqttClientService.PublishAsync(
@@ -161,23 +156,7 @@ public sealed class MqttHostedService : IHostedService
             );
         }
 
-        await _distanceService.ConfirmRetiredSpeakerIdsClearedAsync(
-            retiredIds,
-            cancellationToken
-        );
-        await _mqttClientService.PublishAsync(
-            _options.ServerStatusTopic,
-            CreateStatus(online: true, activeIds.Order().ToArray()),
-            retain: true,
-            cancellationToken: cancellationToken
-        );
+        await _publisher.PublishStatusAsync(cancellationToken);
+        await _publisher.PublishStateAsync(cancellationToken);
     }
-
-    private ServerStatusMessage CreateStatus(bool online, string[] connectedSpeakerIds) => new()
-    {
-        SessionId = _session.Id,
-        StateId = _distanceService.StateId,
-        Online = online,
-        ConnectedSpeakerIds = connectedSpeakerIds,
-    };
 }

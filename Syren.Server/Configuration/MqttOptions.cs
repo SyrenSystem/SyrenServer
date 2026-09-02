@@ -78,4 +78,13 @@ public class MqttOptions
     public string GetUserPositionTopic {get; set; } = "SyrenSystem/SyrenServer/GetUserPosition";
 
     public string ServerStatusTopic { get; set; } = "SyrenSystem/SyrenServer/Status";
+
+    public string ConfigurationTopic { get; set; } = "SyrenSystem/SyrenServer/Configuration";
+    public string RuntimeTopic { get; set; } = "SyrenSystem/SyrenServer/Runtime";
+    public string CommandResultTopic { get; set; } = "SyrenSystem/SyrenServer/CommandResult";
+    public string ConfigureSpeakerTopic { get; set; } = "SyrenSystem/SyrenApp/ConfigureSpeaker";
+    public string DeleteSpeakerTopic { get; set; } = "SyrenSystem/SyrenApp/DeleteSpeaker";
+    public string UpsertGroupTopic { get; set; } = "SyrenSystem/SyrenApp/UpsertGroup";
+    public string DeleteGroupTopic { get; set; } = "SyrenSystem/SyrenApp/DeleteGroup";
+    public string SetSpeakerLevelTopic { get; set; } = "SyrenSystem/SyrenApp/SetSpeakerLevel";
 }

@@ -15,4 +15,16 @@ public sealed class ServerStatusMessage
 
     [JsonPropertyName("connectedSpeakerIds")]
     public string[]? ConnectedSpeakerIds { get; init; }
+
+    public static ServerStatusMessage Create(
+        string sessionId,
+        string stateId,
+        bool online,
+        string[] connectedSpeakerIds) => new()
+    {
+        SessionId = sessionId,
+        StateId = stateId,
+        Online = online,
+        ConnectedSpeakerIds = connectedSpeakerIds,
+    };
 }

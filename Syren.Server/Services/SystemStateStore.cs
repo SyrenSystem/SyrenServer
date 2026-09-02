@@ -13,24 +13,57 @@ public sealed class SystemStateStore : ISystemStateStore
     };
 
     private readonly string _filePath;
+    private readonly SpeakersOptions _speakersOptions;
+    private readonly string[] _sourceIds;
+    private readonly ILogger<SystemStateStore> _logger;
+    private readonly object _syncRoot = new();
 
-    public SystemStateStore(IOptions<StateOptions> options)
+    public SystemStateStore(
+        IOptions<StateOptions> options,
+        IOptions<SpeakersOptions> speakersOptions,
+        IOptions<PlaybackOptions> playbackOptions,
+        ILogger<SystemStateStore> logger)
     {
         _filePath = options.Value.FilePath;
+        _speakersOptions = speakersOptions.Value;
+        _sourceIds = playbackOptions.Value.Sources.Select(source => source.Id).ToArray();
+        _logger = logger;
         Current = LoadOrCreate();
     }
 
     public PersistentSystemState Current { get; private set; }
 
+    public event Action? Changed;
+
     public void Save(PersistentSystemState state)
     {
-        Validate(state);
+        lock (_syncRoot)
+        {
+            SaveLocked(state);
+        }
+        Changed?.Invoke();
+    }
+
+    public PersistentSystemState Update(Func<PersistentSystemState, PersistentSystemState> update)
+    {
+        PersistentSystemState state;
+        lock (_syncRoot)
+        {
+            state = update(Current);
+            SaveLocked(state);
+        }
+        Changed?.Invoke();
+        return state;
+    }
+
+    private void SaveLocked(PersistentSystemState state)
+    {
+        PersistentStateFactory.Validate(state);
         string? directory = Path.GetDirectoryName(_filePath);
         if (!string.IsNullOrWhiteSpace(directory))
         {
             Directory.CreateDirectory(directory);
         }
-
         string temporaryPath = $"{_filePath}.{Guid.NewGuid():N}.tmp";
         try
         {
@@ -61,30 +94,44 @@ public sealed class SystemStateStore : ISystemStateStore
 
     private PersistentSystemState LoadOrCreate()
     {
-        if (!File.Exists(_filePath))
-        {
-            var state = new PersistentSystemState
-            {
-                StateId = Guid.NewGuid().ToString(),
-            };
-            Save(state);
-            return state;
-        }
-
         try
         {
-            using FileStream stream = File.OpenRead(_filePath);
-            PersistentSystemState? state = JsonSerializer.Deserialize<PersistentSystemState>(
-                stream,
-                SerializerOptions
-            );
-            if (state == null)
+            if (!File.Exists(_filePath))
+            {
+                PersistentSystemState created = PersistentStateFactory.CreateNew(_speakersOptions);
+                SaveLocked(created);
+                return created;
+            }
+
+            PersistentSystemState? loaded = ReadFile();
+            if (loaded == null)
             {
                 throw new InvalidDataException("The system state file is empty");
             }
 
-            Validate(state);
-            return state;
+            if (loaded.Version == 1)
+            {
+                PersistentSystemState migrated = PersistentStateFactory.MigrateVersionOne(
+                    loaded,
+                    _speakersOptions,
+                    _sourceIds
+                );
+                migrated = PersistentStateFactory.DropUnknownSources(migrated, _sourceIds, WarnUnknownSource);
+                SaveLocked(migrated);
+                return migrated;
+            }
+
+            PersistentStateFactory.Validate(loaded);
+            PersistentSystemState cleaned = PersistentStateFactory.DropUnknownSources(
+                loaded,
+                _sourceIds,
+                WarnUnknownSource
+            );
+            if (!ReferenceEquals(cleaned, loaded))
+            {
+                SaveLocked(cleaned);
+            }
+            return cleaned;
         }
         catch (Exception exception) when (exception is JsonException or InvalidDataException)
         {
@@ -95,36 +142,15 @@ public sealed class SystemStateStore : ISystemStateStore
         }
     }
 
-    private static void Validate(PersistentSystemState state)
+    private PersistentSystemState? ReadFile()
     {
-        if (state.Version != 1)
-        {
-            throw new InvalidDataException($"Unsupported system state version {state.Version}");
-        }
-
-        if (!Guid.TryParse(state.StateId, out _))
-        {
-            throw new InvalidDataException("System stateId must be a GUID");
-        }
-
-        foreach (PersistentSpeakerState speaker in state.Speakers)
-        {
-            if (string.IsNullOrWhiteSpace(speaker.SensorId) ||
-                !double.IsFinite(speaker.Volume) ||
-                speaker.Volume is < 0 or > 100)
-            {
-                throw new InvalidDataException("System state contains an invalid speaker");
-            }
-
-            if (speaker.Connected && (!speaker.Position.HasValue || !IsFinite(speaker.Position.Value)))
-            {
-                throw new InvalidDataException("Connected speakers require a finite position");
-            }
-        }
+        using FileStream stream = File.OpenRead(_filePath);
+        return JsonSerializer.Deserialize<PersistentSystemState>(stream, SerializerOptions);
     }
 
-    private static bool IsFinite(PositionVector position) =>
-        double.IsFinite(position.X) &&
-        double.IsFinite(position.Y) &&
-        double.IsFinite(position.Z);
+    private void WarnUnknownSource(string groupId, string sourceId) => _logger.LogWarning(
+        "Dropping unknown audio source {SourceId} from playback group {GroupId}",
+        sourceId,
+        groupId
+    );
 }

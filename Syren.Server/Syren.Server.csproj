@@ -11,4 +11,8 @@
     <PackageReference Include="MQTTnet" Version="5.0.1.1416" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Syren.Server.Tests" />
+  </ItemGroup>
+
 </Project>

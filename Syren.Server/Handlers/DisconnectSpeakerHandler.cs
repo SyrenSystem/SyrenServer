@@ -42,7 +42,7 @@ public sealed class DisconnectSpeakerHandler : IMqttMessageHandler
                 return;
             }
 
-            string sensorId = data.SensorId.ToLowerInvariant();
+            string sensorId = Identifiers.Normalize(data.SensorId);
             DisconnectResult result = await _distanceService.DisconnectSpeakerAsync(
                 sensorId,
                 cancellationToken

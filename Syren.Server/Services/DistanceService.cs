@@ -1,8 +1,7 @@
 using System.Numerics;
-using Microsoft.Extensions.Options;
-using Syren.Server.Configuration;
 using Syren.Server.Extensions;
 using Syren.Server.Models;
+using Syren.Server.Models.SnapCast;
 
 namespace Syren.Server.Services;
 
@@ -19,18 +18,21 @@ public sealed class DistanceService : IDistanceService, IHostedService
     ];
 
     private readonly object _stateLock = new();
-    private readonly Dictionary<string, Speaker> _speakers;
+    private readonly Dictionary<string, Speaker> _speakers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Speaker> _speakersById = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PersistentPlaybackGroup> _groupBySpeakerId =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, SpeakerState> _speakerStates = [];
     private readonly Dictionary<string, double> _lastKnownVolumes = [];
-    private readonly HashSet<string> _retiredSensorIds;
-    private readonly Dictionary<string, VolumeDispatchState> _volumeDispatchers = [];
+    private readonly HashSet<string> _retiredSensorIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, VolumeDispatchState> _volumeDispatchers =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly ISnapCastService _snapCastService;
     private readonly ISystemStateStore _stateStore;
     private readonly ILogger<DistanceService> _logger;
     private int? _lastInsufficientSpeakerCount;
 
     public DistanceService(
-        IOptions<SpeakersOptions> speakersOptions,
         ISnapCastService snapCastService,
         ISystemStateStore stateStore,
         ILogger<DistanceService> logger)
@@ -38,78 +40,47 @@ public sealed class DistanceService : IDistanceService, IHostedService
         _snapCastService = snapCastService;
         _stateStore = stateStore;
         _logger = logger;
-        _speakers = speakersOptions.Value.SpeakersInfo.ToDictionary(
-            speaker => NormalizeId(speaker.SensorId),
-            speaker => new Speaker
-            {
-                SensorId = NormalizeId(speaker.SensorId),
-                SnapClientId = NormalizeId(speaker.SnapClientId),
-                FullVolumeDistance = speaker.FullVolumeDistance,
-                MuteDistance = speaker.MuteDistance,
-            },
-            StringComparer.OrdinalIgnoreCase
-        );
 
-        _retiredSensorIds = new HashSet<string>(
-            stateStore.Current.RetiredSensorIds.Select(NormalizeId),
-            StringComparer.OrdinalIgnoreCase
-        );
-
-        bool stateChanged = false;
-        foreach (PersistentSpeakerState persistedSpeaker in stateStore.Current.Speakers)
+        PersistentSystemState current = stateStore.Current;
+        RebuildLookupsLocked(current);
+        foreach (PersistentSpeakerState persistedSpeaker in current.Speakers)
         {
-            string sensorId = NormalizeId(persistedSpeaker.SensorId);
-            if (!_speakers.TryGetValue(sensorId, out Speaker speaker))
+            if (persistedSpeaker.SensorId == null)
             {
-                _retiredSensorIds.Add(sensorId);
-                stateChanged = true;
                 continue;
             }
-
+            string sensorId = Identifiers.Normalize(persistedSpeaker.SensorId);
             _lastKnownVolumes[sensorId] = persistedSpeaker.Volume;
             if (persistedSpeaker.Connected && persistedSpeaker.Position.HasValue)
             {
                 _speakerStates[sensorId] = new SpeakerState
                 {
-                    Speaker = speaker,
+                    Speaker = _speakers[sensorId],
                     Position = persistedSpeaker.Position.Value.ToVector3(),
                     Distance = 0,
                     Volume = persistedSpeaker.Volume,
-                    LastSentVolume = null,
+                    HasFreshDistance = false,
                 };
             }
-        }
-
-        if (stateChanged)
-        {
-            SaveStateLocked();
         }
     }
 
     public string StateId => _stateStore.Current.StateId;
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Muting configured Snapclients at startup");
-        foreach (Speaker speaker in _speakers.Values)
+        Speaker[] configuredSpeakers;
+        lock (_stateLock)
         {
-            try
-            {
-                await _snapCastService.SetClientVolumeAsync(
-                    speaker.SnapClientId,
-                    0,
-                    cancellationToken
-                );
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                _logger.LogWarning(
-                    exception,
-                    "Unable to mute Snapclient {SnapClientId} during startup",
-                    speaker.SnapClientId
-                );
-            }
+            configuredSpeakers = _speakersById.Values.ToArray();
         }
+
+        foreach (Speaker speaker in configuredSpeakers)
+        {
+            QueueVolume(speaker.SnapClientId, 0);
+        }
+        return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -130,7 +101,19 @@ public sealed class DistanceService : IDistanceService, IHostedService
                     cancellationToken
                 );
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (SnapServerUnavailableException exception)
+            {
+                _logger.LogWarning(
+                    "Unable to mute Snapclient {SnapClientId} during shutdown: {Message}",
+                    speaker.SnapClientId,
+                    exception.Message
+                );
+            }
+            catch (Exception exception)
             {
                 _logger.LogWarning(
                     exception,
@@ -145,7 +128,7 @@ public sealed class DistanceService : IDistanceService, IHostedService
         DistanceData distance,
         CancellationToken cancellationToken = default)
     {
-        string sensorId = NormalizeId(distance.SpeakerId);
+        string sensorId = Identifiers.Normalize(distance.SpeakerId);
         string snapClientId;
         int targetVolume;
 
@@ -164,12 +147,8 @@ public sealed class DistanceService : IDistanceService, IHostedService
             }
 
             state.Distance = distance.Distance;
-            targetVolume = ComputeTargetVolume(state);
-            if (state.LastSentVolume == targetVolume)
-            {
-                return Task.CompletedTask;
-            }
-
+            state.HasFreshDistance = true;
+            targetVolume = ComputeTargetVolumeLocked(state.Speaker.Id, state.Volume, state);
             snapClientId = state.Speaker.SnapClientId;
         }
 
@@ -178,7 +157,7 @@ public sealed class DistanceService : IDistanceService, IHostedService
             sensorId,
             targetVolume
         );
-        QueueVolume(sensorId, snapClientId, targetVolume);
+        QueueVolume(snapClientId, targetVolume);
         return Task.CompletedTask;
     }
 
@@ -187,13 +166,13 @@ public sealed class DistanceService : IDistanceService, IHostedService
         double volume,
         CancellationToken cancellationToken = default)
     {
-        sensorId = NormalizeId(sensorId);
-        string? snapClientId = null;
-        int targetVolume = 0;
+        sensorId = Identifiers.Normalize(sensorId);
+        string snapClientId;
+        int targetVolume;
 
         lock (_stateLock)
         {
-            if (!_speakers.ContainsKey(sensorId))
+            if (!_speakers.TryGetValue(sensorId, out Speaker? speaker))
             {
                 _logger.LogWarning("Ignoring volume for unknown speaker {SensorId}", sensorId);
                 return Task.CompletedTask;
@@ -204,18 +183,10 @@ public sealed class DistanceService : IDistanceService, IHostedService
                 out double previousVolume
             );
             _lastKnownVolumes[sensorId] = volume;
-            if (_speakerStates.TryGetValue(sensorId, out SpeakerState? state))
+            _speakerStates.TryGetValue(sensorId, out SpeakerState? state);
+            if (state != null)
             {
                 state.Volume = volume;
-                snapClientId = state.Speaker.SnapClientId;
-                targetVolume = ComputeTargetVolume(state);
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "Remembering volume for disconnected speaker {SensorId}",
-                    sensorId
-                );
             }
 
             try
@@ -238,54 +209,59 @@ public sealed class DistanceService : IDistanceService, IHostedService
                 }
                 throw;
             }
+
+            snapClientId = speaker.SnapClientId;
+            targetVolume = ComputeTargetVolumeLocked(speaker.Id, volume, state);
         }
 
-        if (snapClientId != null)
-        {
-            QueueVolume(sensorId, snapClientId, targetVolume);
-        }
+        QueueVolume(snapClientId, targetVolume);
         return Task.CompletedTask;
     }
 
     public async Task<SpeakerState?> ConnectSpeakerAsync(
         string sensorId,
-        double volume,
+        double? volume,
         CancellationToken cancellationToken = default)
     {
-        sensorId = NormalizeId(sensorId);
+        sensorId = Identifiers.Normalize(sensorId);
         SpeakerState? state;
         int targetVolume;
+        bool inGroup;
 
         lock (_stateLock)
         {
-            if (!_speakers.TryGetValue(sensorId, out Speaker speaker))
+            if (!_speakers.TryGetValue(sensorId, out Speaker? speaker))
             {
                 _logger.LogWarning("Ignoring connection for unknown speaker {SensorId}", sensorId);
                 return null;
             }
 
+            bool hadRememberedVolume = _lastKnownVolumes.TryGetValue(
+                sensorId,
+                out double rememberedVolume
+            );
+            double level = volume ?? (hadRememberedVolume ? rememberedVolume : 100);
             if (_speakerStates.TryGetValue(sensorId, out state))
             {
                 double previousVolume = state.Volume;
-                state.Volume = volume;
-                _lastKnownVolumes[sensorId] = volume;
-                try
+                state.Volume = level;
+                _lastKnownVolumes[sensorId] = level;
+                if (volume.HasValue)
                 {
-                    SaveStateLocked();
-                }
-                catch
-                {
-                    state.Volume = previousVolume;
-                    _lastKnownVolumes[sensorId] = previousVolume;
-                    throw;
+                    try
+                    {
+                        SaveStateLocked();
+                    }
+                    catch
+                    {
+                        state.Volume = previousVolume;
+                        _lastKnownVolumes[sensorId] = previousVolume;
+                        throw;
+                    }
                 }
             }
             else
             {
-                bool hadRememberedVolume = _lastKnownVolumes.TryGetValue(
-                    sensorId,
-                    out double previousRememberedVolume
-                );
                 Vector3? position = GetNewSpeakerPositionLocked();
                 if (!position.HasValue || !IsFinite(position.Value))
                 {
@@ -298,11 +274,12 @@ public sealed class DistanceService : IDistanceService, IHostedService
                     Speaker = speaker,
                     Position = position.Value,
                     Distance = 0,
-                    Volume = volume,
-                    LastSentVolume = null,
+                    Volume = level,
+                    // A fresh connect counts as distance 0 known.
+                    HasFreshDistance = true,
                 };
                 _speakerStates.Add(sensorId, state);
-                _lastKnownVolumes[sensorId] = volume;
+                _lastKnownVolumes[sensorId] = level;
                 try
                 {
                     SaveStateLocked();
@@ -312,7 +289,7 @@ public sealed class DistanceService : IDistanceService, IHostedService
                     _speakerStates.Remove(sensorId);
                     if (hadRememberedVolume)
                     {
-                        _lastKnownVolumes[sensorId] = previousRememberedVolume;
+                        _lastKnownVolumes[sensorId] = rememberedVolume;
                     }
                     else
                     {
@@ -321,15 +298,18 @@ public sealed class DistanceService : IDistanceService, IHostedService
                     throw;
                 }
             }
-            targetVolume = ComputeTargetVolume(state);
+            inGroup = _groupBySpeakerId.ContainsKey(speaker.Id);
+            targetVolume = ComputeTargetVolumeLocked(speaker.Id, state.Volume, state);
         }
 
-        await QueueVolumeAndWaitAsync(
-            sensorId,
-            state.Speaker.SnapClientId,
-            targetVolume,
-            cancellationToken
-        );
+        if (!inGroup)
+        {
+            _logger.LogWarning(
+                "Speaker {SensorId} is not in a playback group and stays silent",
+                sensorId
+            );
+        }
+        await QueueVolumeAndWaitAsync(state.Speaker.SnapClientId, targetVolume, cancellationToken);
         return state;
     }
 
@@ -337,12 +317,13 @@ public sealed class DistanceService : IDistanceService, IHostedService
         string sensorId,
         CancellationToken cancellationToken = default)
     {
-        sensorId = NormalizeId(sensorId);
+        sensorId = Identifiers.Normalize(sensorId);
         SpeakerState? removedState;
+        int targetVolume;
 
         lock (_stateLock)
         {
-            if (!_speakers.ContainsKey(sensorId))
+            if (!_speakers.TryGetValue(sensorId, out Speaker? speaker))
             {
                 return DisconnectResult.UnknownSensor;
             }
@@ -361,12 +342,12 @@ public sealed class DistanceService : IDistanceService, IHostedService
                 _speakerStates[sensorId] = removedState;
                 throw;
             }
+            targetVolume = ComputeTargetVolumeLocked(speaker.Id, removedState.Volume, null);
         }
 
         await QueueVolumeAndWaitAsync(
-            sensorId,
             removedState.Speaker.SnapClientId,
-            0,
+            targetVolume,
             cancellationToken
         );
         return DisconnectResult.Disconnected;
@@ -408,7 +389,7 @@ public sealed class DistanceService : IDistanceService, IHostedService
             IReadOnlyList<SpeakerPosition> positions = _speakerStates.Values
                 .Select(state => new SpeakerPosition
                 {
-                    SpeakerId = state.Speaker.SensorId,
+                    SpeakerId = state.Speaker.SensorId!,
                     Position = PositionVector.FromVector3(state.Position),
                 })
                 .ToArray();
@@ -440,7 +421,7 @@ public sealed class DistanceService : IDistanceService, IHostedService
     {
         lock (_stateLock)
         {
-            string[] normalizedIds = sensorIds.Select(NormalizeId).ToArray();
+            string[] normalizedIds = sensorIds.Select(Identifiers.Normalize).ToArray();
             string[] removedIds = normalizedIds
                 .Where(sensorId => _retiredSensorIds.Remove(sensorId))
                 .ToArray();
@@ -448,7 +429,7 @@ public sealed class DistanceService : IDistanceService, IHostedService
             {
                 try
                 {
-                    SaveStateLocked();
+                    SaveStateLocked(bumpRevision: false);
                 }
                 catch
                 {
@@ -458,6 +439,161 @@ public sealed class DistanceService : IDistanceService, IHostedService
             }
         }
         return Task.CompletedTask;
+    }
+
+    public PersistentSystemState ApplyConfigurationChange(
+        Func<PersistentSystemState, PersistentSystemState> mutation)
+    {
+        lock (_stateLock)
+        {
+            PersistentSystemState updated = _stateStore.Update(current =>
+                RetireRemovedSensors(current, mutation(current))
+            );
+            ReloadConfigurationLocked(updated);
+            return updated;
+        }
+    }
+
+    public Task ApplyCurrentVolumesAsync(
+        IReadOnlyDictionary<string, SnapClientVolumeStatus?>? reportedVolumes = null,
+        CancellationToken cancellationToken = default)
+    {
+        var changes = new List<(string ClientId, int Volume, SnapClientVolumeStatus? Reported)>();
+        lock (_stateLock)
+        {
+            foreach (PersistentSpeakerState speaker in _stateStore.Current.Speakers)
+            {
+                string clientId = Identifiers.Normalize(speaker.SnapClientId!);
+                SnapClientVolumeStatus? reported = null;
+                if (reportedVolumes != null && !reportedVolumes.TryGetValue(clientId, out reported))
+                {
+                    // Snapserver does not know this client yet, so there is nothing to set.
+                    continue;
+                }
+                string speakerId = Identifiers.Normalize(speaker.SpeakerId!);
+                SpeakerState? state = null;
+                double level = speaker.Volume;
+                if (speaker.SensorId != null)
+                {
+                    string sensorId = Identifiers.Normalize(speaker.SensorId);
+                    _speakerStates.TryGetValue(sensorId, out state);
+                    if (_lastKnownVolumes.TryGetValue(sensorId, out double knownLevel))
+                    {
+                        level = knownLevel;
+                    }
+                }
+                changes.Add((clientId, ComputeTargetVolumeLocked(speakerId, level, state), reported));
+            }
+        }
+        foreach ((string clientId, int volume, SnapClientVolumeStatus? reported) in changes)
+        {
+            if (reportedVolumes == null)
+            {
+                QueueVolume(clientId, volume);
+            }
+            else if (reported != null && reported.Percent == volume && !reported.Muted)
+            {
+                MarkVolumeSent(clientId, volume);
+            }
+            else
+            {
+                QueueVolume(clientId, volume, resend: true);
+            }
+        }
+        return Task.CompletedTask;
+    }
+
+    private static PersistentSystemState RetireRemovedSensors(
+        PersistentSystemState previous,
+        PersistentSystemState updated)
+    {
+        var remainingSensorIds = updated.Speakers
+            .Where(speaker => speaker.SensorId != null)
+            .Select(speaker => Identifiers.Normalize(speaker.SensorId!))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string[] removedSensorIds = previous.Speakers
+            .Where(speaker => speaker.SensorId != null)
+            .Select(speaker => Identifiers.Normalize(speaker.SensorId!))
+            .Where(sensorId => !remainingSensorIds.Contains(sensorId))
+            .ToArray();
+        if (removedSensorIds.Length == 0)
+        {
+            return updated;
+        }
+        return updated with
+        {
+            RetiredSensorIds = updated.RetiredSensorIds
+                .Select(Identifiers.Normalize)
+                .Concat(removedSensorIds)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Order()
+                .ToList(),
+        };
+    }
+
+    private void RebuildLookupsLocked(PersistentSystemState current)
+    {
+        _speakersById.Clear();
+        _speakers.Clear();
+        _groupBySpeakerId.Clear();
+        _retiredSensorIds.Clear();
+        foreach (PersistentSpeakerState persistedSpeaker in current.Speakers)
+        {
+            Speaker speaker = CreateSpeaker(persistedSpeaker);
+            _speakersById.Add(speaker.Id, speaker);
+            if (speaker.SensorId != null)
+            {
+                _speakers.Add(speaker.SensorId, speaker);
+            }
+        }
+        foreach (PersistentPlaybackGroup group in current.Groups)
+        {
+            foreach (string speakerId in group.SpeakerIds)
+            {
+                _groupBySpeakerId[Identifiers.Normalize(speakerId)] = group;
+            }
+        }
+        _retiredSensorIds.UnionWith(current.RetiredSensorIds.Select(Identifiers.Normalize));
+    }
+
+    private void ReloadConfigurationLocked(PersistentSystemState current)
+    {
+        RebuildLookupsLocked(current);
+
+        foreach (string sensorId in _speakerStates.Keys
+            .Where(sensorId => !_speakers.ContainsKey(sensorId))
+            .ToArray())
+        {
+            _speakerStates.Remove(sensorId);
+        }
+        foreach (string sensorId in _lastKnownVolumes.Keys
+            .Where(sensorId => !_speakers.ContainsKey(sensorId))
+            .ToArray())
+        {
+            _lastKnownVolumes.Remove(sensorId);
+        }
+        var configuredClientIds = _speakersById.Values
+            .Select(speaker => speaker.SnapClientId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (string snapClientId in _volumeDispatchers.Keys
+            .Where(snapClientId => !configuredClientIds.Contains(snapClientId))
+            .ToArray())
+        {
+            _volumeDispatchers.Remove(snapClientId);
+        }
+
+        foreach (PersistentSpeakerState speaker in current.Speakers.Where(
+            speaker => speaker.SensorId != null
+        ))
+        {
+            string sensorId = Identifiers.Normalize(speaker.SensorId!);
+            _lastKnownVolumes[sensorId] = speaker.Volume;
+            if (_speakerStates.TryGetValue(sensorId, out SpeakerState? state))
+            {
+                state.Speaker = _speakers[sensorId];
+                state.Volume = speaker.Volume;
+            }
+        }
     }
 
     private Vector3? GetNewSpeakerPositionLocked() => _speakerStates.Count switch
@@ -590,8 +726,24 @@ public sealed class DistanceService : IDistanceService, IHostedService
         return result;
     }
 
-    private int ComputeTargetVolume(SpeakerState state)
+    private int ComputeTargetVolumeLocked(string speakerId, double level, SpeakerState? state)
     {
+        if (!_groupBySpeakerId.TryGetValue(speakerId, out PersistentPlaybackGroup? group) || group.Muted)
+        {
+            return 0;
+        }
+
+        double groupModifier = group.MasterVolume / 100;
+        if (group.VolumeMode == "manual")
+        {
+            return Math.Clamp((int)Math.Round(level * groupModifier), 0, 100);
+        }
+
+        if (state == null || !state.HasFreshDistance)
+        {
+            return 0;
+        }
+
         double distance = Math.Clamp(
             state.Distance,
             state.Speaker.FullVolumeDistance,
@@ -602,83 +754,123 @@ public sealed class DistanceService : IDistanceService, IHostedService
         ) / (
             state.Speaker.MuteDistance - state.Speaker.FullVolumeDistance
         );
-        return Math.Clamp((int)(state.Volume * modifier), 0, 100);
+        return Math.Clamp((int)Math.Round(level * groupModifier * modifier), 0, 100);
     }
 
-    private void QueueVolume(string sensorId, string snapClientId, int targetVolume)
+    // Records a volume Snapserver already reports so the dispatcher does not send it again.
+    private void MarkVolumeSent(string snapClientId, int volume)
     {
-        VolumeDispatchState dispatcher = GetDispatcher(sensorId);
+        VolumeDispatchState dispatcher = GetDispatcher(snapClientId);
         lock (dispatcher.SyncRoot)
         {
-            dispatcher.SnapClientId = snapClientId;
-            dispatcher.DesiredVolume = targetVolume;
-            dispatcher.Version++;
-            if (dispatcher.Worker == null || dispatcher.Worker.IsCompleted)
+            if (dispatcher.Worker is { IsCompleted: false })
             {
-                dispatcher.Worker = RunVolumeDispatcherAsync(sensorId, dispatcher);
+                return;
+            }
+            dispatcher.DesiredVolume = volume;
+            dispatcher.LastSentVolume = volume;
+        }
+    }
+
+    // Resend forces the value out even when it matches the last sent volume.
+    private void QueueVolume(string snapClientId, int targetVolume, bool resend = false)
+    {
+        VolumeDispatchState dispatcher = GetDispatcher(snapClientId);
+        lock (dispatcher.SyncRoot)
+        {
+            bool running = dispatcher.Worker is { IsCompleted: false };
+            if (resend && !running)
+            {
+                dispatcher.LastSentVolume = null;
+            }
+            if (!QueueLocked(dispatcher, targetVolume, running))
+            {
+                return;
+            }
+            if (!running)
+            {
+                dispatcher.Worker = RunVolumeDispatcherAsync(snapClientId, dispatcher);
             }
         }
     }
 
     private Task QueueVolumeAndWaitAsync(
-        string sensorId,
         string snapClientId,
         int targetVolume,
         CancellationToken cancellationToken)
     {
-        VolumeDispatchState dispatcher = GetDispatcher(sensorId);
+        VolumeDispatchState dispatcher = GetDispatcher(snapClientId);
         TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (dispatcher.SyncRoot)
         {
-            dispatcher.SnapClientId = snapClientId;
-            dispatcher.DesiredVolume = targetVolume;
-            dispatcher.Version++;
-            dispatcher.Waiters.Add((dispatcher.Version, completion));
-            if (dispatcher.Worker == null || dispatcher.Worker.IsCompleted)
+            bool running = dispatcher.Worker is { IsCompleted: false };
+            if (!QueueLocked(dispatcher, targetVolume, running) && !running)
             {
-                dispatcher.Worker = RunVolumeDispatcherAsync(sensorId, dispatcher);
+                return Task.CompletedTask;
+            }
+            dispatcher.Waiters.Add((dispatcher.Version, completion));
+            if (!running)
+            {
+                dispatcher.Worker = RunVolumeDispatcherAsync(snapClientId, dispatcher);
             }
         }
         return completion.Task.WaitAsync(cancellationToken);
     }
 
-    private VolumeDispatchState GetDispatcher(string sensorId)
+    // Returns false when the volume is already sent or in flight.
+    private static bool QueueLocked(VolumeDispatchState dispatcher, int targetVolume, bool running)
+    {
+        bool unchanged = running
+            ? dispatcher.DesiredVolume == targetVolume
+            : dispatcher.LastSentVolume == targetVolume;
+        if (unchanged)
+        {
+            return false;
+        }
+        dispatcher.DesiredVolume = targetVolume;
+        dispatcher.Version++;
+        return true;
+    }
+
+    private VolumeDispatchState GetDispatcher(string snapClientId)
     {
         lock (_stateLock)
         {
-            if (!_volumeDispatchers.TryGetValue(sensorId, out VolumeDispatchState? dispatcher))
+            if (!_volumeDispatchers.TryGetValue(snapClientId, out VolumeDispatchState? dispatcher))
             {
                 dispatcher = new VolumeDispatchState();
-                _volumeDispatchers.Add(sensorId, dispatcher);
+                _volumeDispatchers.Add(snapClientId, dispatcher);
             }
             return dispatcher;
         }
     }
 
-    private async Task RunVolumeDispatcherAsync(string sensorId, VolumeDispatchState dispatcher)
+    private async Task RunVolumeDispatcherAsync(string snapClientId, VolumeDispatchState dispatcher)
     {
         while (true)
         {
             long version;
             int targetVolume;
-            string snapClientId;
             lock (dispatcher.SyncRoot)
             {
                 version = dispatcher.Version;
                 targetVolume = dispatcher.DesiredVolume;
-                snapClientId = dispatcher.SnapClientId;
             }
 
+            bool sent = false;
             try
             {
                 await _snapCastService.SetClientVolumeAsync(snapClientId, targetVolume);
-                lock (_stateLock)
-                {
-                    if (_speakerStates.TryGetValue(sensorId, out SpeakerState? state))
-                    {
-                        state.LastSentVolume = targetVolume;
-                    }
-                }
+                sent = true;
+            }
+            catch (SnapServerUnavailableException exception)
+            {
+                _logger.LogWarning(
+                    "Unable to set Snapclient {SnapClientId} volume to {Volume}: {Message}",
+                    snapClientId,
+                    targetVolume,
+                    exception.Message
+                );
             }
             catch (Exception exception)
             {
@@ -692,6 +884,7 @@ public sealed class DistanceService : IDistanceService, IHostedService
 
             lock (dispatcher.SyncRoot)
             {
+                dispatcher.LastSentVolume = sent ? targetVolume : null;
                 foreach ((long waiterVersion, TaskCompletionSource waiter) in
                     dispatcher.Waiters.Where(waiter => waiter.Version <= version).ToArray())
                 {
@@ -708,23 +901,31 @@ public sealed class DistanceService : IDistanceService, IHostedService
         }
     }
 
-    private void SaveStateLocked()
+    // Retired sensor bookkeeping is not part of the Configuration snapshot, so it saves without a revision bump.
+    private void SaveStateLocked(bool bumpRevision = true)
     {
-        var persistentSpeakers = _lastKnownVolumes.Select(entry =>
+        _stateStore.Update(current => current with
         {
-            bool connected = _speakerStates.TryGetValue(entry.Key, out SpeakerState? state);
-            return new PersistentSpeakerState
+            Revision = bumpRevision ? current.Revision + 1 : current.Revision,
+            Speakers = current.Speakers.Select(existing =>
             {
-                SensorId = entry.Key,
-                Connected = connected,
-                Volume = entry.Value,
-                Position = connected ? PositionVector.FromVector3(state!.Position) : null,
-            };
-        }).ToList();
-        _stateStore.Save(new PersistentSystemState
-        {
-            StateId = _stateStore.Current.StateId,
-            Speakers = persistentSpeakers,
+                string? sensorId = existing.SensorId == null
+                    ? null
+                    : Identifiers.Normalize(existing.SensorId);
+                SpeakerState? state = null;
+                bool connected = sensorId != null &&
+                    _speakerStates.TryGetValue(sensorId, out state);
+                double volume = sensorId != null &&
+                    _lastKnownVolumes.TryGetValue(sensorId, out double level)
+                    ? level
+                    : existing.Volume;
+                return existing with
+                {
+                    Connected = connected,
+                    Volume = volume,
+                    Position = connected ? PositionVector.FromVector3(state!.Position) : null,
+                };
+            }).ToList(),
             RetiredSensorIds = _retiredSensorIds.Order().ToList(),
         });
     }
@@ -746,13 +947,21 @@ public sealed class DistanceService : IDistanceService, IHostedService
         float.IsFinite(position.Y) &&
         float.IsFinite(position.Z);
 
-    private static string NormalizeId(string sensorId) => sensorId.ToLowerInvariant();
+    private static Speaker CreateSpeaker(PersistentSpeakerState speaker) => new()
+    {
+        Id = Identifiers.Normalize(speaker.SpeakerId!),
+        Name = speaker.Name!,
+        SensorId = Identifiers.NormalizeOptional(speaker.SensorId),
+        SnapClientId = Identifiers.Normalize(speaker.SnapClientId!),
+        FullVolumeDistance = speaker.FullVolumeDistance,
+        MuteDistance = speaker.MuteDistance,
+    };
 
     private sealed class VolumeDispatchState
     {
         public object SyncRoot { get; } = new();
-        public string SnapClientId { get; set; } = string.Empty;
         public int DesiredVolume { get; set; }
+        public int? LastSentVolume { get; set; }
         public long Version { get; set; }
         public Task? Worker { get; set; }
         public List<(long Version, TaskCompletionSource Completion)> Waiters { get; } = [];
