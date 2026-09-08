@@ -50,7 +50,7 @@ The `snapserver-data` volume holds `/var/lib/snapserver`, where Snapserver keeps
 
 Host networking uses the localhost defaults from `appsettings.json`. A deployment without host networking must override both peer hosts and provide a separate mDNS and Zeroconf design for Spotify discovery.
 
-The Snapserver configuration in `deploy/snapserver/snapserver.conf` uses a 200 ms playback buffer for every Snapcast stream. The laptop source uses 10 ms input chunks and uncompressed PCM to avoid codec delay, while Spotify uses Snapserver's default 20 ms chunk. A future design that needs a very different total latency for each source will require separate playback pipelines rather than a single Snapserver instance.
+The Snapserver configuration in `deploy/snapserver/snapserver.conf` uses Snapcast's default 1000 ms playback buffer for every Snapcast stream, which favours stability now that low latency laptop audio goes over the separate RTP path. The laptop source uses 10 ms input chunks and uncompressed PCM to avoid codec delay, while Spotify uses Snapserver's default 20 ms chunk. A future design that needs a very different total latency for each source will require separate playback pipelines rather than a single Snapserver instance.
 
 ## Setup from the app
 
