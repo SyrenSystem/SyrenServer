@@ -238,6 +238,31 @@ public sealed class DistanceServiceTests
     }
 
     [Fact]
+    public async Task SourceBalanceFollowsPriorityAndPreservesMaster()
+    {
+        var stateStore = new MemoryStateStore(new PersistentSystemState
+        {
+            StateId = Guid.NewGuid().ToString(),
+            Speakers = [RestoredSpeaker(connected: false) with { Volume = 80 }],
+            Groups = [PersistentStateFactory.CreateDefaultGroup(["sensor"], ["spotify", "laptop"], "manual")
+                with { MasterVolume = 50, SourceLevels = new() { ["spotify"] = 50, ["laptop"] = 75 } }],
+        });
+        var snapCastService = new RecordingSnapCastService();
+        DistanceService service = TestServices.CreateDistanceService(snapCastService, stateStore);
+        await service.ApplyCurrentVolumesAsync(activeSources: new HashSet<string> { "spotify", "laptop" });
+        await TestServices.WaitUntilAsync(() => snapCastService.VolumeChanges.Contains(("snap-client", 20)));
+        await service.ApplyCurrentVolumesAsync(activeSources: new HashSet<string> { "laptop" });
+        await TestServices.WaitUntilAsync(() => snapCastService.VolumeChanges.Contains(("snap-client", 30)));
+        service.ApplyConfigurationChange(current => current with
+        {
+            Groups = current.Groups.Select(group => group with { MasterVolume = 100 }).ToList(),
+        });
+        await service.ApplyCurrentVolumesAsync();
+        await TestServices.WaitUntilAsync(() => snapCastService.VolumeChanges.Contains(("snap-client", 60)));
+        Assert.Equal(50, stateStore.Current.Groups[0].SourceLevels["spotify"]);
+    }
+
+    [Fact]
     public async Task AutomaticGroupMemberWithoutCalibrationIsSilent()
     {
         var stateStore = new MemoryStateStore(RestoredState(connected: false));

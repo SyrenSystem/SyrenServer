@@ -10,6 +10,22 @@ namespace Syren.Server.Tests;
 public sealed class SystemStateStoreTests
 {
     [Fact]
+    public void ReloadsSourceBalanceWithoutChangingMaster()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = CreateStore(directory.StatePath);
+        store.Save(store.Current with
+        {
+            Groups = [PersistentStateFactory.CreateDefaultGroup([], TestServices.SourceIds, "manual")
+                with { MasterVolume = 60, SourceLevels = new() { ["spotify"] = 45, ["laptop"] = 90 } }],
+        });
+        var restored = CreateStore(directory.StatePath).Current.Groups.Single();
+        Assert.Equal(60, restored.MasterVolume);
+        Assert.Equal(45, restored.SourceLevels["spotify"]);
+        Assert.Equal(90, restored.SourceLevels["laptop"]);
+    }
+
+    [Fact]
     public void CreatesAndReloadsState()
     {
         using var directory = new TemporaryDirectory();
@@ -152,7 +168,8 @@ public sealed class SystemStateStoreTests
               "groups": [
                 {
                   "id": "office", "name": "Office", "speakerIds": ["desk"],
-                  "sourcePriority": ["spotify", "radio"], "volumeMode": "manual", "masterVolume": 80
+                  "sourcePriority": ["spotify", "radio"], "volumeMode": "manual", "masterVolume": 80,
+                  "sourceLevels": { "spotify": 60, "radio": 35 }
                 }
               ]
             }
@@ -162,8 +179,37 @@ public sealed class SystemStateStoreTests
 
         PersistentPlaybackGroup group = Assert.Single(store.Current.Groups);
         Assert.Equal(["spotify"], group.SourcePriority);
+        Assert.Equal(new Dictionary<string, double> { ["spotify"] = 60 }, group.SourceLevels);
         Assert.Equal(4, store.Current.Revision);
         Assert.Equal(["spotify"], CreateStore(directory.StatePath).Current.Groups.Single().SourcePriority);
+    }
+
+    [Fact]
+    public void StaleSourceLevelsAreDroppedEvenWhenPriorityIsClean()
+    {
+        using var directory = new TemporaryDirectory();
+        File.WriteAllText(directory.StatePath, $$"""
+            {
+              "version": 2,
+              "stateId": "{{Guid.NewGuid()}}",
+              "revision": 3,
+              "speakers": [],
+              "groups": [
+                {
+                  "id": "office", "name": "Office", "speakerIds": [],
+                  "sourcePriority": ["spotify"], "volumeMode": "manual", "masterVolume": 80,
+                  "sourceLevels": { "spotify": 60, "radio": 35 }
+                }
+              ]
+            }
+            """);
+
+        var store = CreateStore(directory.StatePath);
+
+        PersistentPlaybackGroup group = Assert.Single(store.Current.Groups);
+        Assert.Equal(["spotify"], group.SourcePriority);
+        Assert.Equal(new Dictionary<string, double> { ["spotify"] = 60 }, group.SourceLevels);
+        Assert.Equal(4, store.Current.Revision);
     }
 
     private static SystemStateStore CreateStore(string path, SpeakersOptions? speakerOptions = null) => new(

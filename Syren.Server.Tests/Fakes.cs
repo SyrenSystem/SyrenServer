@@ -188,7 +188,8 @@ internal sealed class RecordingDistanceService : IDistanceService
 
     public Task ApplyCurrentVolumesAsync(
         IReadOnlyDictionary<string, SnapClientVolumeStatus?>? reportedVolumes = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<string>? activeSources = null)
     {
         ApplyVolumeCount++;
         LastReportedVolumes = reportedVolumes;

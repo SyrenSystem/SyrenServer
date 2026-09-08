@@ -152,6 +152,8 @@ public sealed class SystemConfigurationService : BackgroundService, ISystemConfi
                 Name = command.Name.Trim(),
                 SpeakerIds = command.SpeakerIds.Select(Identifiers.Normalize).Distinct().ToList(),
                 SourcePriority = command.SourcePriority.Select(Identifiers.Normalize).Distinct().ToList(),
+                SourceLevels = command.SourceLevels?.ToDictionary(pair => Identifiers.Normalize(pair.Key), pair => pair.Value)
+                    ?? current.Groups.FirstOrDefault(existing => existing.Id == groupId)?.SourceLevels ?? [],
                 VolumeMode = command.VolumeMode,
                 MasterVolume = command.MasterVolume,
                 Muted = command.Muted,
@@ -433,7 +435,9 @@ public sealed class SystemConfigurationService : BackgroundService, ISystemConfi
                 clients => clients.First().Config?.Volume,
                 StringComparer.OrdinalIgnoreCase
             );
-        await _distanceService.ApplyCurrentVolumesAsync(reportedVolumes, cancellationToken);
+        await _distanceService.ApplyCurrentVolumesAsync(reportedVolumes, cancellationToken,
+            status.Streams.Where(stream => stream.Status.Equals("playing", StringComparison.OrdinalIgnoreCase))
+                .Select(stream => stream.Id).ToHashSet(StringComparer.OrdinalIgnoreCase));
 
         HashSet<string> configuredClientIds = current.Speakers
             .Select(speaker => speaker.SnapClientId!)
@@ -618,7 +622,7 @@ public sealed class SystemConfigurationService : BackgroundService, ISystemConfi
         }
     }
 
-    private void SignalReconcile()
+    internal void SignalReconcile()
     {
         lock (_signalLock)
         {
@@ -687,6 +691,13 @@ public sealed class SystemConfigurationService : BackgroundService, ISystemConfi
         HashSet<string> availableSources = _options.Sources
             .Select(source => source.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (command.SourceLevels is { } levels &&
+            (levels.Any(pair => !availableSources.Contains(pair.Key) ||
+                !double.IsFinite(pair.Value) || pair.Value is < 0 or > 100) ||
+             levels.Keys.Select(Identifiers.Normalize).Distinct().Count() != levels.Count))
+        {
+            throw new InvalidOperationException("Source levels must be between 0 and 100 for known audio sources");
+        }
         if (sourceIds.Any(sourceId => !availableSources.Contains(sourceId)))
         {
             throw new InvalidOperationException("Playback group contains an unknown audio source");
@@ -756,6 +767,7 @@ public sealed class SystemConfigurationService : BackgroundService, ISystemConfi
         Name = group.Name,
         SpeakerIds = group.SpeakerIds.ToArray(),
         SourcePriority = group.SourcePriority.ToArray(),
+        SourceLevels = new(group.SourceLevels),
         VolumeMode = group.VolumeMode,
         MasterVolume = group.MasterVolume,
         Muted = group.Muted,

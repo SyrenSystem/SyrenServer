@@ -130,12 +130,20 @@ internal static class PersistentStateFactory
             List<string> kept = group.SourcePriority
                 .Where(sourceId => knownSources.Contains(sourceId))
                 .ToList();
-            if (kept.Count == group.SourcePriority.Count)
+            // A stale level would be echoed back by every client save and then rejected, so it goes too.
+            Dictionary<string, double> keptLevels = group.SourceLevels
+                .Where(pair => knownSources.Contains(pair.Key))
+                .ToDictionary(pair => pair.Key, pair => pair.Value);
+            if (kept.Count == group.SourcePriority.Count && keptLevels.Count == group.SourceLevels.Count)
             {
                 groups.Add(group);
                 continue;
             }
-            foreach (string sourceId in group.SourcePriority.Except(kept, StringComparer.OrdinalIgnoreCase))
+            IEnumerable<string> unknown = group.SourcePriority
+                .Concat(group.SourceLevels.Keys)
+                .Except(kept, StringComparer.OrdinalIgnoreCase)
+                .Except(keptLevels.Keys, StringComparer.OrdinalIgnoreCase);
+            foreach (string sourceId in unknown)
             {
                 warn(group.Id, sourceId);
             }
@@ -143,6 +151,7 @@ internal static class PersistentStateFactory
             groups.Add(group with
             {
                 SourcePriority = kept.Count == 0 ? sourceIds.ToList() : kept,
+                SourceLevels = keptLevels,
             });
         }
 
@@ -223,6 +232,9 @@ internal static class PersistentStateFactory
                 group.VolumeMode is not ("automatic" or "manual") ||
                 !double.IsFinite(group.MasterVolume) ||
                 group.MasterVolume is < 0 or > 100 ||
+                group.SourceLevels == null ||
+                group.SourceLevels.Any(pair => string.IsNullOrWhiteSpace(pair.Key) ||
+                    !double.IsFinite(pair.Value) || pair.Value is < 0 or > 100) ||
                 group.SourcePriority.Count == 0 ||
                 group.SourcePriority.Any(string.IsNullOrWhiteSpace) ||
                 group.SourcePriority.Distinct(StringComparer.OrdinalIgnoreCase).Count() !=

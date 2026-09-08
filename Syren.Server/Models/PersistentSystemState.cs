@@ -64,6 +64,9 @@ public sealed record PersistentPlaybackGroup
     [JsonPropertyName("speakerIds")]
     public List<string> SpeakerIds { get; init; } = [];
 
+    [JsonPropertyName("sourceLevels")]
+    public Dictionary<string, double> SourceLevels { get; init; } = [];
+
     [JsonPropertyName("sourcePriority")]
     public List<string> SourcePriority { get; init; } = [];
 

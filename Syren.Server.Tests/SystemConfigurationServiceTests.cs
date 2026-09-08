@@ -7,6 +7,26 @@ namespace Syren.Server.Tests;
 
 public sealed class SystemConfigurationServiceTests
 {
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(101)]
+    public async Task SourceBalanceRejectsInvalidLevels(double level)
+    {
+        var stateStore = new MemoryStateStore(CreateStateWithSpeaker());
+        var service = TestServices.CreateConfigurationService(stateStore,
+            new RecordingDistanceService(stateStore), new RecordingSnapCastService());
+        var command = GroupCommand("manual", "Group", "speaker-one");
+        var result = await service.UpsertGroupAsync(new UpsertGroupCommand
+        {
+            RequestId = command.RequestId, ExpectedRevision = command.ExpectedRevision,
+            GroupId = command.GroupId, Name = command.Name, SpeakerIds = command.SpeakerIds,
+            SourcePriority = command.SourcePriority, VolumeMode = command.VolumeMode,
+            MasterVolume = command.MasterVolume, Muted = command.Muted,
+            SourceLevels = new() { ["spotify"] = level },
+        });
+        Assert.False(result.Success);
+    }
+
     [Fact]
     public async Task ConfigureSpeakerSupportsManualSpeakerWithoutSensor()
     {

@@ -49,6 +49,9 @@ public sealed class UpsertGroupCommand : ConfigurationCommand
     [JsonPropertyName("speakerIds")]
     public required string[] SpeakerIds { get; init; }
 
+    [JsonPropertyName("sourceLevels")]
+    public Dictionary<string, double>? SourceLevels { get; init; }
+
     [JsonPropertyName("sourcePriority")]
     public required string[] SourcePriority { get; init; }
 

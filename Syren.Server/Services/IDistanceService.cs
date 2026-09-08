@@ -21,6 +21,7 @@ public interface IDistanceService
     // Pass the client volumes Snapserver reports so unknown clients are skipped and drift is corrected.
     Task ApplyCurrentVolumesAsync(
         IReadOnlyDictionary<string, SnapClientVolumeStatus?>? reportedVolumes = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<string>? activeSources = null);
     string StateId { get; }
 }

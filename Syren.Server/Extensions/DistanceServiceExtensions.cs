@@ -39,6 +39,8 @@ public static class DistanceServiceExtensions
             serviceProvider.GetRequiredService<SystemConfigurationService>()
         );
 
+        services.AddHostedService<SnapCastEventsService>();
+
         return services;
     }
 }

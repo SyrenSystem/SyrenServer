@@ -454,13 +454,17 @@ public sealed class DistanceService : IDistanceService, IHostedService
         }
     }
 
+    private IReadOnlySet<string> _activeSources = new HashSet<string>();
+
     public Task ApplyCurrentVolumesAsync(
         IReadOnlyDictionary<string, SnapClientVolumeStatus?>? reportedVolumes = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<string>? activeSources = null)
     {
         var changes = new List<(string ClientId, int Volume, SnapClientVolumeStatus? Reported)>();
         lock (_stateLock)
         {
+            if (activeSources != null) _activeSources = activeSources;
             foreach (PersistentSpeakerState speaker in _stateStore.Current.Speakers)
             {
                 string clientId = Identifiers.Normalize(speaker.SnapClientId!);
@@ -733,7 +737,9 @@ public sealed class DistanceService : IDistanceService, IHostedService
             return 0;
         }
 
-        double groupModifier = group.MasterVolume / 100;
+        string? selectedSource = group.SourcePriority.FirstOrDefault(_activeSources.Contains);
+        double sourceLevel = selectedSource != null ? group.SourceLevels.GetValueOrDefault(selectedSource, 100) : 100;
+        double groupModifier = group.MasterVolume / 100 * sourceLevel / 100;
         if (group.VolumeMode == "manual")
         {
             return Math.Clamp((int)Math.Round(level * groupModifier), 0, 100);
