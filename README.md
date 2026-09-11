@@ -8,6 +8,10 @@ The stack contains Mosquitto, Snapserver with librespot, and SyrenServer. Snapse
 
 All three containers use host networking. Librespot needs LAN multicast DNS and a dynamic Zeroconf port to appear in Spotify Connect, so bridge networking is not suitable for the deployed stack.
 
+The audio dependencies were checked on 2026-09-09: Snapcast 0.35.0, Mosquitto 2.1.2, and librespot's current development revision with upstream [recovery PR 1692](https://github.com/librespot-org/librespot/pull/1692). The PR is not merged upstream. It preserves playback state during session recovery so playback can resume without selecting the device again; a process restart alone does not provide that behavior. Exact revisions and package checksums are recorded in `deploy/snapserver/versions.json` and shipped inside the image at `/usr/share/syrensystem/audio-versions.json`.
+
+The image build runs the patched librespot workspace tests and a real Snapserver protocol test with synthetic sources. Snapserver 0.35.0 also includes `snapserver-lifecycle.patch`, which fixes a deleted iterator being dereferenced and callbacks reaching deleted priority streams. Listener ownership is retained for each callback without holding the listener list lock during the call. The protocol test caught the crashes and now checks source activity transitions and repeated priority stream creation and removal. Changes to audio dependencies must pass the image build as well as the shared audio regression gate. Updating versions means refreshing the pinned revisions, checking whether the patches have merged, and rerunning both gates.
+
 Build and validate without starting it:
 
 ```bash
@@ -50,7 +54,9 @@ The `snapserver-data` volume holds `/var/lib/snapserver`, where Snapserver keeps
 
 Host networking uses the localhost defaults from `appsettings.json`. A deployment without host networking must override both peer hosts and provide a separate mDNS and Zeroconf design for Spotify discovery.
 
-The Snapserver configuration in `deploy/snapserver/snapserver.conf` uses Snapcast's default 1000 ms playback buffer for every Snapcast stream, which favours stability now that low latency laptop audio goes over the separate RTP path. The laptop source uses 10 ms input chunks and uncompressed PCM to avoid codec delay, while Spotify uses Snapserver's default 20 ms chunk. A future design that needs a very different total latency for each source will require separate playback pipelines rather than a single Snapserver instance.
+The Snapserver configuration in `deploy/snapserver/snapserver.conf` uses a 500 ms playback buffer for every Snapcast stream to reduce the delay before playback changes reach the speakers. Low latency laptop audio uses the separate RTP path. The laptop source uses 10 ms input chunks and uncompressed PCM to avoid codec delay, while Spotify uses Snapserver's default 20 ms chunk. A future design that needs a very different total latency for each source will require separate playback pipelines rather than a single Snapserver instance.
+
+Spotify's own volume slider controls librespot with `--volume-ctrl linear`. The receiver applies the requested level directly as audio gain, so an 80% Connect volume produces 80% signal amplitude. This avoids librespot's default 60 dB logarithmic curve, which reduces amplitude to about 25% at the same setting. Group master volume, speaker levels, and source balance remain separate controls. An exact perceptual match to a particular Spotify desktop version requires a playback comparison.
 
 ## Setup from the app
 

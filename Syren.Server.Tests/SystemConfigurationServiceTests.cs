@@ -8,6 +8,98 @@ namespace Syren.Server.Tests;
 public sealed class SystemConfigurationServiceTests
 {
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AudioHandoffsPublishEverySourceChangeWithoutRebuildingPriorityStreams(bool spotifyFirst)
+    {
+        string[] priority = spotifyFirst ? ["spotify", "laptop"] : ["laptop", "spotify"];
+        var state = CreateStateWithGroup("manual", "speaker-one");
+        state = state with { Groups = [state.Groups[0] with { SourcePriority = priority.ToList() }] };
+        var stateStore = new MemoryStateStore(state);
+        var snapcast = new RecordingSnapCastService
+        {
+            Status = StatusWithGroup("snap-group", Client("snap-one")),
+        };
+        var service = TestServices.CreateConfigurationService(stateStore,
+            new RecordingDistanceService(stateStore), snapcast);
+        await service.ReconcileAsync();
+        string streamId = Assert.Single(snapcast.GroupStreamChanges).StreamId;
+        Assert.Contains($"meta:///{string.Join('/', priority)}?", Assert.Single(snapcast.AddedStreams));
+        snapcast.GroupStreamChanges.Clear();
+        snapcast.GroupClientChanges.Clear();
+        snapcast.AddedStreams.Clear();
+        int notifications = 0;
+        service.RuntimeChanged += () => notifications++;
+
+        for (int index = 0; index < 100; index++)
+        {
+            bool spotify = index % 2 == 0;
+            bool laptop = index % 3 != 0;
+            snapcast.Status = new SnapServerStatus
+            {
+                Groups = [new SnapGroupStatus { Id = "snap-group", Name = "Group",
+                    StreamId = streamId, Clients = [Client("snap-one")] }],
+                Streams = [new SnapStreamStatus { Id = streamId, Status = "playing" },
+                    new SnapStreamStatus { Id = "spotify", Status = spotify ? "playing" : "idle" },
+                    new SnapStreamStatus { Id = "laptop", Status = laptop ? "playing" : "idle" }],
+            };
+            await service.ReconcileAsync();
+            Assert.Equal(index + 1, notifications);
+            Assert.Equal(spotify, service.CurrentRuntime.Sources.Single(source => source.Id == "spotify").Active);
+            Assert.Equal(laptop, service.CurrentRuntime.Sources.Single(source => source.Id == "laptop").Active);
+            await service.ReconcileAsync();
+            Assert.Equal(index + 1, notifications);
+            Assert.Empty(snapcast.GroupStreamChanges);
+            Assert.Empty(snapcast.GroupClientChanges);
+            Assert.Empty(snapcast.AddedStreams);
+            Assert.Empty(snapcast.RemovedStreams);
+        }
+    }
+
+    [Fact]
+    public async Task AudioSettingsKeepTheExistingPriorityStreamAndClientMembership()
+    {
+        var stateStore = new MemoryStateStore(CreateStateWithGroup("manual", "speaker-one"));
+        var snapcast = new RecordingSnapCastService
+        {
+            Status = StatusWithGroup("snap-group", Client("snap-one")),
+        };
+        var service = TestServices.CreateConfigurationService(stateStore,
+            new RecordingDistanceService(stateStore), snapcast);
+        await service.ReconcileAsync();
+        string streamId = Assert.Single(snapcast.GroupStreamChanges).StreamId;
+        snapcast.GroupStreamChanges.Clear();
+        snapcast.GroupClientChanges.Clear();
+        snapcast.AddedStreams.Clear();
+        for (int index = 0; index < 20; index++)
+        {
+            var previous = stateStore.Current.Groups[0];
+            snapcast.Status = new SnapServerStatus
+            {
+                Groups = [new SnapGroupStatus { Id = "snap-group", Name = previous.Name,
+                    Muted = previous.Muted, StreamId = streamId, Clients = [Client("snap-one")] }],
+                Streams = [new SnapStreamStatus { Id = streamId, Status = "playing" },
+                    new SnapStreamStatus { Id = "spotify", Status = "playing" },
+                    new SnapStreamStatus { Id = "laptop", Status = "playing" }],
+            };
+            var result = await service.UpsertGroupAsync(new UpsertGroupCommand
+            {
+                RequestId = $"settings-{index}", ExpectedRevision = stateStore.Current.Revision,
+                GroupId = "group", Name = $"Room {index}", SpeakerIds = ["speaker-one"],
+                SourcePriority = previous.SourcePriority.ToArray(), VolumeMode = "manual",
+                MasterVolume = index * 5, Muted = index % 2 == 0,
+                SourceLevels = new() { ["spotify"] = 100 - index, ["laptop"] = index * 5 },
+            });
+            Assert.True(result.Success);
+            await service.ReconcileAsync();
+            Assert.Empty(snapcast.GroupStreamChanges);
+            Assert.Empty(snapcast.GroupClientChanges);
+            Assert.Empty(snapcast.AddedStreams);
+            Assert.Empty(snapcast.RemovedStreams);
+        }
+    }
+
+    [Theory]
     [InlineData(-1)]
     [InlineData(101)]
     public async Task SourceBalanceRejectsInvalidLevels(double level)

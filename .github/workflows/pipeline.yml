@@ -1,14 +1,22 @@
 name: SyrenServer build pipeline
 
-on:
-  push:
-    branches: [ "main", "syren-reality" ]
-  pull_request:
-    branches: [ "main" ]
+on: [push, pull_request, merge_group, workflow_dispatch]
 
 jobs:
+  snapserver:
+    name: Audio recovery build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build patched Spotify and current Snapserver
+      run: docker build --pull --tag syren-snapserver-check deploy/snapserver
+    - name: Check the shipped binaries
+      run: |
+        docker run --rm --entrypoint /usr/local/bin/librespot syren-snapserver-check --version
+        docker run --rm --entrypoint /usr/bin/snapserver syren-snapserver-check --version
   build:
-    name: Build
+    name: Audio regression gate (server)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4

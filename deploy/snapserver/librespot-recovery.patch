@@ -1,0 +1,1338 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0f39ea3..064b5e9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ ### Changed
+ 
+ - [core] Made `SpotifyId::to_base62`, `SpotifyId::to_base16`, `FileId::to_base16`, `SpotifyUri::to_id`, `SpotifyUri::to_uri` infallible (breaking)
++- [connect] `Spirc::new` now returns a future resolving to `Option<SavedPlaybackState>` instead of `()`; pass it to `Spirc::with_saved_state` to restore playback across session reconnects (breaking)
+ 
+ ### Fixed
+ 
+@@ -25,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ - [core] Fix default permissions on credentials file and warn user if file is world readable
+ - [core] Try all resolved addresses for the dealer connection instead of failing after the first one.
+ - [audio] Try the next CDN URL when a fetch returns a non-206 status instead of only retrying on transport errors, fixing playback failures when the first CDN URL is reachable but does not stream audio.
++- [core] Fix dealer websocket reconnect leaving spirc hung on stale subscription channels.
++- [connect] Save and restore playback state across session reconnects.
++- [core] Add a timeout to control-plane HTTP requests so a half-open connection can't hang the spirc event loop.
++- [connect] Add a reconnect watchdog that restarts spirc if the device is not re-registered after a dealer reconnect, so it can't silently disappear from Spotify Connect.
+ 
+ ## [0.8.0] - 2025-11-10
+ 
+diff --git a/connect/Cargo.toml b/connect/Cargo.toml
+index bc5267f..20d70e8 100644
+--- a/connect/Cargo.toml
++++ b/connect/Cargo.toml
+@@ -32,5 +32,8 @@ tokio = { version = "1", features = ["macros", "sync"] }
+ tokio-stream = { version = "0.1", default-features = false }
+ uuid = { version = "1.18", default-features = false, features = ["v4"] }
+ 
++[dev-dependencies]
++tokio = { version = "1", features = ["macros", "rt", "sync", "test-util", "time"] }
++
+ [lints]
+ workspace = true
+diff --git a/connect/src/context_resolver.rs b/connect/src/context_resolver.rs
+index ce3ecda..8847639 100644
+--- a/connect/src/context_resolver.rs
++++ b/connect/src/context_resolver.rs
+@@ -155,8 +155,12 @@ impl ContextResolver {
+             last_try
+         };
+ 
+-        if last_try.is_some() {
+-            debug!("tried loading unavailable context: {resolve}");
++        if let Some(last_try) = last_try {
++            info!(
++                "skipped resolving unavailable context ({resolve}): resolving failed {}s ago, retrying in {}s",
++                last_try.as_secs(),
++                RETRY_UNAVAILABLE.saturating_sub(last_try).as_secs()
++            );
+             return;
+         } else if self.queue.contains(&resolve) {
+             debug!("update for {resolve} is already added");
+@@ -171,6 +175,16 @@ impl ContextResolver {
+         self.queue.push_back(resolve)
+     }
+ 
++    /// Adds a context for resolving even if it recently failed, so that a
++    /// deliberate user action (transfer, load) always gets a fresh attempt
++    /// instead of being dropped while the context is marked unavailable.
++    pub fn add_forced(&mut self, resolve: ResolveContext) {
++        if self.unavailable_contexts.remove(&resolve).is_some() {
++            info!("resolving unavailable context by user request: {resolve}");
++        }
++        self.add(resolve)
++    }
++
+     pub fn add_list(&mut self, resolve: Vec<ResolveContext>) {
+         for resolve in resolve {
+             self.add(resolve)
+@@ -344,3 +358,68 @@ impl ContextResolver {
+         true
+     }
+ }
++
++#[cfg(test)]
++mod test {
++    use super::*;
++    use crate::core::SessionConfig;
++
++    fn resolver() -> ContextResolver {
++        ContextResolver::new(Session::new(SessionConfig::default(), None))
++    }
++
++    fn resolve() -> ResolveContext {
++        ResolveContext::from_uri(
++            "spotify:playlist:37i9dQZF1EIhMHNZW8S7ky",
++            "spotify:track:6ek9SiEj5a65WIs2EV7qiM",
++            ContextType::Default,
++            ContextAction::Replace,
++        )
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn add_drops_unavailable_context_until_retry_expires() {
++        let mut resolver = resolver();
++
++        resolver.add(resolve());
++        assert!(resolver.has_next());
++
++        resolver.mark_next_unavailable();
++        resolver.remove_used_and_invalid();
++        assert!(!resolver.has_next());
++
++        resolver.add(resolve());
++        assert!(!resolver.has_next());
++
++        tokio::time::advance(RETRY_UNAVAILABLE + Duration::from_secs(1)).await;
++        resolver.add(resolve());
++        assert!(resolver.has_next());
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn add_forced_retries_unavailable_context_immediately() {
++        let mut resolver = resolver();
++
++        resolver.add(resolve());
++        resolver.mark_next_unavailable();
++        resolver.remove_used_and_invalid();
++
++        resolver.add_forced(resolve());
++        assert!(resolver.has_next());
++
++        resolver.remove_used_and_invalid();
++        resolver.add(resolve());
++        assert!(resolver.has_next());
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn add_dedups_already_queued_context() {
++        let mut resolver = resolver();
++
++        resolver.add(resolve());
++        resolver.add(resolve());
++
++        resolver.remove_used_and_invalid();
++        assert!(!resolver.has_next());
++    }
++}
+diff --git a/connect/src/model.rs b/connect/src/model.rs
+index 10f25f1..a6d892c 100644
+--- a/connect/src/model.rs
++++ b/connect/src/model.rs
+@@ -1,5 +1,6 @@
+ use crate::{
+     core::dealer::protocol::SkipTo, protocol::context_player_options::ContextPlayerOptionOverrides,
++    state::ConnectState,
+ };
+ 
+ use std::ops::Deref;
+@@ -165,3 +166,11 @@ pub(super) enum SpircPlayStatus {
+         preloading_of_next_track_triggered: bool,
+     },
+ }
++
++/// Playback state saved across session reconnects so the new SpircTask
++/// can resume where the old one left off.
++pub struct SavedPlaybackState {
++    pub(super) connect_state: ConnectState,
++    pub(super) play_status: SpircPlayStatus,
++    pub(super) play_request_id: Option<u64>,
++}
+diff --git a/connect/src/spirc.rs b/connect/src/spirc.rs
+index c7c195b..cea4e6f 100644
+--- a/connect/src/spirc.rs
++++ b/connect/src/spirc.rs
+@@ -11,13 +11,13 @@ use crate::{
+         session::UserAttributes,
+         spclient::TransferRequest,
+     },
+-    model::{LoadRequest, PlayingTrack, SpircPlayStatus},
++    model::{LoadRequest, PlayingTrack, SavedPlaybackState, SpircPlayStatus},
+     playback::{
+         mixer::Mixer,
+         player::{Player, PlayerEvent, PlayerEventChannel, QueueTrack},
+     },
+     protocol::{
+-        connect::{Cluster, ClusterUpdate, LogoutCommand, SetVolumeCommand},
++        connect::{Cluster, ClusterUpdate, DeviceInfo, LogoutCommand, SetVolumeCommand},
+         context::Context,
+         explicit_content_pubsub::UserAttributesUpdate,
+         player::ProvidedTrack,
+@@ -27,6 +27,7 @@ use crate::{
+         user_attributes::UserAttributesMutation,
+     },
+     state::{
++        StateError,
+         context::{ContextType, ResetContext},
+         provider::IsProvider,
+         {ConnectConfig, ConnectState},
+@@ -36,13 +37,18 @@ use futures_util::StreamExt;
+ use librespot_protocol::context_page::ContextPage;
+ use protobuf::MessageField;
+ use std::{
++    collections::HashMap,
+     future::Future,
++    mem,
+     sync::Arc,
+     sync::atomic::{AtomicUsize, Ordering},
+     time::{Duration, SystemTime, UNIX_EPOCH},
+ };
+ use thiserror::Error;
+-use tokio::{sync::mpsc, time::sleep};
++use tokio::{
++    sync::mpsc,
++    time::{Instant, sleep, sleep_until},
++};
+ 
+ #[derive(Debug, Error)]
+ enum SpircError {
+@@ -69,6 +75,13 @@ impl From<SpircError> for Error {
+     }
+ }
+ 
++fn is_no_context_error(err: &Error) -> bool {
++    matches!(
++        err.error.downcast_ref::<StateError>(),
++        Some(StateError::NoContext(_))
++    )
++}
++
+ struct SpircTask {
+     player: Arc<Player>,
+     mixer: Arc<dyn Mixer>,
+@@ -103,6 +116,10 @@ struct SpircTask {
+     /// is set when transferring, and used after resolving the contexts to finish the transfer
+     pub transfer_state: Option<TransferState>,
+ 
++    /// tracks that became unavailable while their context was still resolving,
++    /// handled again once the context is available
++    pending_unavailable_tracks: Vec<SpotifyUri>,
++
+     /// when set to true, it will update the volume after [VOLUME_UPDATE_DELAY],
+     /// when no other future resolves, otherwise resets the delay
+     update_volume: bool,
+@@ -111,6 +128,23 @@ struct SpircTask {
+     /// when no other future resolves, otherwise resets the delay
+     update_state: bool,
+ 
++    /// DIAG: maps device_id (GUID) -> friendly label, populated from cluster
++    /// updates. Used only to identify which controller sends commands/transfers
++    /// in the logs.
++    device_directory: HashMap<String, String>,
++
++    /// When set, a dealer reconnect happened and we're waiting for a fresh
++    /// connection_id to re-register this device. If the deadline passes before
++    /// re-registration, we force a spirc restart to recover. Cleared whenever we
++    /// successfully register.
++    reconnect_grace_until: Option<Instant>,
++
++    /// The dealer reconnect generation under which we last successfully put
++    /// our connect state (registered). Compared against the current generation
++    /// when a reconnect signal arrives, to tell whether a connection_id push
++    /// already re-registered us for that reconnect.
++    registered_reconnect_gen: u64,
++
+     spirc_id: usize,
+ }
+ 
+@@ -146,6 +180,11 @@ const VOLUME_UPDATE_DELAY: Duration = Duration::from_millis(500);
+ // to reduce updates to remote, we group some request by waiting for a set amount of time
+ const UPDATE_STATE_DELAY: Duration = Duration::from_millis(200);
+ 
++// After a dealer reconnect, how long we wait for a fresh connection_id to
++// re-register this device before forcing a spirc restart to recover. The push
++// normally arrives within ~1-2s; this only fires if it never does.
++const RECONNECT_REREGISTER_GRACE: Duration = Duration::from_secs(30);
++
+ /// The spotify connect handle
+ pub struct Spirc {
+     commands: mpsc::UnboundedSender<SpircCommand>,
+@@ -164,7 +203,23 @@ impl Spirc {
+         credentials: Credentials,
+         player: Arc<Player>,
+         mixer: Arc<dyn Mixer>,
+-    ) -> Result<(Spirc, impl Future<Output = ()>), Error> {
++    ) -> Result<(Spirc, impl Future<Output = Option<SavedPlaybackState>>), Error> {
++        Self::with_saved_state(config, session, credentials, player, mixer, None).await
++    }
++
++    /// Like [`Spirc::new`], but restores playback state from a previous session.
++    ///
++    /// When `saved_state` is provided, the new SpircTask picks up where the
++    /// old one left off — same track, position, and connect state — so the
++    /// Player can continue without interruption after a session reconnect.
++    pub async fn with_saved_state(
++        config: ConnectConfig,
++        session: Session,
++        credentials: Credentials,
++        player: Arc<Player>,
++        mixer: Arc<dyn Mixer>,
++        saved_state: Option<SavedPlaybackState>,
++    ) -> Result<(Spirc, impl Future<Output = Option<SavedPlaybackState>>), Error> {
+         fn extract_connection_id(msg: Message) -> Result<String, Error> {
+             let connection_id = msg
+                 .headers
+@@ -177,7 +232,32 @@ impl Spirc {
+         debug!("new Spirc[{spirc_id}]");
+ 
+         let emit_set_queue_events = config.emit_set_queue_events;
+-        let connect_state = ConnectState::new(config, &session);
++
++        let (connect_state, play_status, play_request_id) = match saved_state {
++            Some(saved) => {
++                info!("Spirc[{spirc_id}] restoring saved playback state");
++                let mut cs = saved.connect_state;
++                // Update to the new session's ID so Spotify sees us as the same device.
++                cs.set_session_id(session.session_id());
++                (cs, saved.play_status, saved.play_request_id)
++            }
++            None => (
++                ConnectState::new(config, &session),
++                SpircPlayStatus::Stopped,
++                None,
++            ),
++        };
++
++        // Subscribe to player events before any awaits below. Session setup
++        // (client_token / connect / login5) takes seconds, and a subscriber
++        // only receives events emitted after it subscribes — the previous
++        // SpircTask's channel died with it. Without this, events the Player
++        // emits meanwhile (EndOfTrack, Unavailable, ...) are lost, leaving a
++        // restored spirc stuck in a Playing/Loading state that nothing will
++        // ever advance. Buffered events are handled as soon as the task loop
++        // starts: its player-events select arm is not gated on
++        // connect_established.
++        let player_events = player.get_player_event_channel();
+ 
+         let connection_id_update = session
+             .dealer()
+@@ -227,8 +307,6 @@ impl Spirc {
+ 
+         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+ 
+-        let player_events = player.get_player_event_channel();
+-
+         let mut task = SpircTask {
+             player,
+             mixer,
+@@ -236,8 +314,8 @@ impl Spirc {
+             connect_state,
+             connect_established: false,
+ 
+-            play_request_id: None,
+-            play_status: SpircPlayStatus::Stopped,
++            play_request_id,
++            play_status,
+ 
+             connection_id_update,
+             connect_state_update,
+@@ -259,9 +337,15 @@ impl Spirc {
+             session,
+ 
+             transfer_state: None,
++            pending_unavailable_tracks: Vec::new(),
+             update_volume: false,
+             update_state: false,
+ 
++            device_directory: HashMap::new(),
++
++            reconnect_grace_until: None,
++            registered_reconnect_gen: 0,
++
+             spirc_id,
+         };
+ 
+@@ -280,6 +364,27 @@ impl Spirc {
+             Err(why) => error!("failed to update initial volume: {why}"),
+         };
+ 
++        // If the old session died while a track load was in flight, that load
++        // belongs to the dead session: its audio-key request rode the dead AP
++        // connection and will fail — possibly before we could subscribe to
++        // player events above. Don't trust it: drop the stale play_request_id
++        // so late events from the old load are ignored, and re-issue the load
++        // on the new session (the Player cancels the old loader). Playing and
++        // Paused restores are untouched: audio is running and must not be
++        // interrupted.
++        let reload = match task.play_status {
++            SpircPlayStatus::LoadingPlay { position_ms } => Some((true, position_ms)),
++            SpircPlayStatus::LoadingPause { position_ms } => Some((false, position_ms)),
++            _ => None,
++        };
++        if let Some((start_playing, position_ms)) = reload {
++            info!("Spirc[{spirc_id}] restored mid-load state, re-issuing load at {position_ms}ms");
++            task.play_request_id = None;
++            if let Err(why) = task.load_track(start_playing, position_ms) {
++                error!("failed to re-issue load after restore: {why}");
++            }
++        }
++
+         Ok((spirc, task.run()))
+     }
+ 
+@@ -450,7 +555,7 @@ impl Spirc {
+ }
+ 
+ impl SpircTask {
+-    async fn run(mut self) {
++    async fn run(mut self) -> Option<SavedPlaybackState> {
+         // simplify unwrapping of received item or parsed result
+         macro_rules! unwrap {
+             ( $next:expr, |$some:ident| $use_some:expr ) => {
+@@ -470,11 +575,18 @@ impl SpircTask {
+             };
+         }
+ 
++        // Subscribe before start() so we can't miss a reconnect notification.
++        let mut reconnect_rx = self.session.dealer().reconnect_receiver();
++
+         if let Err(why) = self.session.dealer().start().await {
+             error!("starting dealer failed: {why}");
+-            return;
++            return None;
+         }
+ 
++        // Set when the reconnect watchdog decides we must restart to recover our
++        // device registration. Handled after the loop like the session-lost path.
++        let mut force_restart = false;
++
+         while !self.session.is_invalid() && !self.shutdown {
+             let commands = self.commands.as_mut();
+             let player_events = self.player_events.as_mut();
+@@ -483,13 +595,29 @@ impl SpircTask {
+             // because of that the context resolving has to wait, so that the other tasks can finish
+             let allow_context_resolving = !self.update_state && !self.update_volume;
+ 
++            // Copied out so the watchdog select! branch below doesn't borrow self.
++            let reconnect_grace = self.reconnect_grace_until;
++
+             tokio::select! {
+                 // startup of the dealer requires a connection_id, which is retrieved at the very beginning
+                 connection_id_update = self.connection_id_update.next() => unwrap! {
+                     connection_id_update,
+                     match |connection_id| if let Err(why) = self.handle_connection_id_update(connection_id).await {
+                         error!("failed handling connection id update: {why}");
+-                        break;
++                        if !self.connect_established {
++                            // Initial registration failed — can't process
++                            // commands without it, so restart spirc.
++                            break;
++                        }
++                        // Re-registration after a dealer reconnect failed. Arm
++                        // the watchdog (if it isn't already): without it,
++                        // nothing would retry unless another connection_id
++                        // push happens to arrive. A later successful
++                        // registration disarms it.
++                        if self.reconnect_grace_until.is_none() {
++                            self.reconnect_grace_until =
++                                Some(Instant::now() + RECONNECT_REREGISTER_GRACE);
++                        }
+                     }
+                 },
+                 // main dealer update of any remote device updates
+@@ -597,10 +725,83 @@ impl SpircTask {
+                         }
+                     }
+                 },
++                // Dealer reconnected after a connection loss. Our subscription
++                // streams survive because they're registered on the shared
++                // DealerShared — the new websocket dispatches through the same
++                // handlers. A new connection_id will arrive via
++                // connection_id_update and re-register our device state.
++                Ok(()) = reconnect_rx.changed() => {
++                    let reconnect_gen = *reconnect_rx.borrow_and_update();
++                    if self.registered_reconnect_gen == reconnect_gen {
++                        // The new connection's connection_id push was already
++                        // handled (the dealer bumps the generation before
++                        // dispatching any of its messages), so we're registered
++                        // and there's nothing to recover.
++                        info!("Dealer reconnected; already re-registered.");
++                        self.reconnect_grace_until = None;
++                    } else {
++                        info!("Dealer reconnected; awaiting new connection_id.");
++                        // Arm the watchdog: if no new connection_id re-registers
++                        // us within the grace period, force a spirc restart so
++                        // main.rs rebuilds the session/dealer and we re-appear as
++                        // a device (playback continues from the player buffer).
++                        self.reconnect_grace_until =
++                            Some(Instant::now() + RECONNECT_REREGISTER_GRACE);
++                    }
++                },
++                // Reconnect watchdog: a dealer reconnect did not result in a
++                // re-registration within the grace period (e.g. the new
++                // connection_id never arrived). Recover by restarting spirc.
++                _ = async {
++                    match reconnect_grace {
++                        Some(deadline) => sleep_until(deadline).await,
++                        None => std::future::pending::<()>().await,
++                    }
++                }, if reconnect_grace.is_some() => {
++                    warn!(
++                        "dealer reconnected but device was not re-registered within {}s; \
++                         restarting spirc to refresh dealer subscriptions",
++                        RECONNECT_REREGISTER_GRACE.as_secs()
++                    );
++                    self.reconnect_grace_until = None;
++                    force_restart = true;
++                    break;
++                },
+                 else => break
+             }
+         }
+ 
++        if (self.session.is_invalid() || force_restart) && !self.shutdown {
++            // Either the session TCP connection died, or the reconnect watchdog
++            // fired. In both cases skip the server cleanup below (which would
++            // pause/deregister the device) and hand our playback state back to
++            // main.rs. The Player continues playing from its buffer; main.rs
++            // creates a new session and restores this state, re-registering us.
++            if force_restart {
++                warn!(
++                    "forcing spirc restart to recover device registration, saving playback state: {:?}",
++                    self.play_status
++                );
++            } else {
++                warn!(
++                    "session lost, saving playback state for recovery: {:?}",
++                    self.play_status
++                );
++            }
++            // Close the dealer of the session we're abandoning: its run task
++            // would otherwise keep reconnecting — and keep the old Session
++            // alive — forever. Do it in the background, since a graceful close
++            // can take a while on a dead connection and must not delay the
++            // restart.
++            let session = self.session.clone();
++            tokio::spawn(async move { session.dealer().close().await });
++            return Some(SavedPlaybackState {
++                connect_state: mem::take(&mut self.connect_state),
++                play_status: mem::replace(&mut self.play_status, SpircPlayStatus::Stopped),
++                play_request_id: self.play_request_id.take(),
++            });
++        }
++
+         if !self.shutdown && self.connect_state.is_active() {
+             warn!("unexpected shutdown");
+             if let Err(why) = self.handle_disconnect().await {
+@@ -614,6 +815,7 @@ impl SpircTask {
+         };
+ 
+         self.session.dealer().close().await;
++        None
+     }
+ 
+     fn handle_next_context(&mut self, next_context: Result<Context, Error>) -> bool {
+@@ -621,8 +823,8 @@ impl SpircTask {
+             Err(why) => {
+                 self.context_resolver.mark_next_unavailable();
+                 self.context_resolver.remove_used_and_invalid();
+-                error!("{why}");
+-                return false;
++                error!("context resolving failed: {why}");
++                return self.handle_resolve_failure();
+             }
+             Ok(ctx) => ctx,
+         };
+@@ -648,6 +850,7 @@ impl SpircTask {
+             .try_finish(&mut self.connect_state, &mut self.transfer_state)
+         {
+             self.add_autoplay_resolving_when_required();
++            self.handle_deferred_unavailable_tracks();
+             true
+         } else {
+             false
+@@ -662,6 +865,53 @@ impl SpircTask {
+         update_state
+     }
+ 
++    fn context_resolution_pending(&self) -> bool {
++        self.transfer_state.is_some() || self.context_resolver.has_next()
++    }
++
++    /// Handles tracks whose unavailability couldn't be processed earlier
++    /// because their context was still resolving.
++    fn handle_deferred_unavailable_tracks(&mut self) {
++        for track_id in mem::take(&mut self.pending_unavailable_tracks) {
++            info!("handling deferred unavailable track <{track_id}>");
++            let res = self.handle_unavailable(&track_id).and_then(|_| {
++                if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri() {
++                    self.handle_next(None)
++                } else {
++                    Ok(())
++                }
++            });
++            if let Err(why) = res {
++                warn!("failed handling deferred unavailable track: {why}")
++            }
++        }
++    }
++
++    /// A context resolve failed and won't be retried automatically. Ensure the
++    /// device is left in a state a fresh user action can recover from: no
++    /// pending transfer and no load stuck waiting on the missing context.
++    ///
++    /// Failures of automatic context updates while something is playing don't
++    /// require any cleanup and must leave the playback untouched.
++    fn handle_resolve_failure(&mut self) -> bool {
++        self.pending_unavailable_tracks.clear();
++        let had_transfer = self.transfer_state.take().is_some();
++        let was_loading = matches!(
++            self.play_status,
++            SpircPlayStatus::LoadingPlay { .. } | SpircPlayStatus::LoadingPause { .. }
++        );
++
++        if !had_transfer && !was_loading {
++            return false;
++        }
++
++        warn!("giving up on unresolved context, stopping so a new user action can recover");
++        self.handle_stop();
++        self.play_status = SpircPlayStatus::Stopped;
++
++        true
++    }
++
+     /// Emit set queue event via PlayerEvent
+     fn emit_set_queue_event(&self) {
+         if !self.emit_set_queue_events {
+@@ -889,9 +1139,22 @@ impl SpircTask {
+                 return Ok(());
+             }
+             PlayerEvent::Unavailable { track_id, .. } => {
+-                self.handle_unavailable(&track_id)?;
+-                if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri() {
+-                    self.handle_next(None)?
++                match self.handle_unavailable(&track_id) {
++                    Ok(_) => {
++                        if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri() {
++                            self.handle_next(None)?
++                        }
++                    }
++                    // the track failed before its context was resolved (e.g. it
++                    // raced the resolve during a transfer), so it can't be
++                    // skipped over yet: handle it again when the context arrives
++                    Err(why) if is_no_context_error(&why) && self.context_resolution_pending() => {
++                        warn!(
++                            "track <{track_id}> became unavailable before its context resolved, deferring"
++                        );
++                        self.pending_unavailable_tracks.push(track_id);
++                    }
++                    Err(why) => return Err(why),
+                 }
+             }
+             _ => return Ok(()),
+@@ -905,6 +1168,22 @@ impl SpircTask {
+         trace!("Received connection ID update: {connection_id:?}");
+         self.session.set_connection_id(&connection_id);
+ 
++        // If we have active playback (e.g. restored from saved state),
++        // update the position before registering so Spotify sees the
++        // correct track position.
++        if !matches!(self.play_status, SpircPlayStatus::Stopped) {
++            info!(
++                "re-registering with active playback state: {:?}",
++                self.play_status
++            );
++            self.connect_state.set_status(&self.play_status);
++            if self.connect_state.is_playing() {
++                self.connect_state
++                    .update_position_in_relation(self.now_ms());
++            }
++            self.connect_state.set_now(self.now_ms() as u64);
++        }
++
+         let cluster = match self
+             .connect_state
+             .notify_new_device_appeared(&self.session)
+@@ -924,6 +1203,21 @@ impl SpircTask {
+         );
+ 
+         self.connect_established = true;
++        // We successfully (re-)registered: record the dealer generation we
++        // registered under and disarm the reconnect watchdog so it won't force
++        // an unnecessary restart.
++        self.registered_reconnect_gen = *self.session.dealer().reconnect_receiver().borrow();
++        self.reconnect_grace_until = None;
++
++        self.diag_update_device_directory(&cluster.device);
++        info!(
++            "DIAG registered: active_device=<{}> ({}), cluster_session=<{}>, our_session=<{}>, transfer_data={} bytes",
++            cluster.active_device_id,
++            self.diag_device_label(&cluster.active_device_id),
++            cluster.player_state.session_id,
++            self.session.session_id(),
++            cluster.transfer_data.len(),
++        );
+ 
+         let same_session = cluster.player_state.session_id == self.session.session_id()
+             || cluster.player_state.session_id.is_empty();
+@@ -1012,6 +1306,12 @@ impl SpircTask {
+         );
+ 
+         if let Some(cluster) = cluster_update.cluster.take() {
++            self.diag_update_device_directory(&cluster.device);
++            info!(
++                "DIAG cluster update: reason={reason:?}, active_device=<{}> ({}), changed=[{device_ids}]",
++                cluster.active_device_id,
++                self.diag_device_label(&cluster.active_device_id),
++            );
+             let became_inactive = self.connect_state.is_active()
+                 && cluster.active_device_id != self.session.device_id();
+             if became_inactive {
+@@ -1031,15 +1331,43 @@ impl SpircTask {
+         Ok(())
+     }
+ 
++    /// DIAG: record device_id -> friendly label from a cluster's device map,
++    /// so we can identify which controller sends commands/transfers.
++    fn diag_update_device_directory(&mut self, devices: &HashMap<String, DeviceInfo>) {
++        for (id, info) in devices {
++            let label = format!(
++                "{} [{} {} / {:?}]",
++                info.name,
++                info.brand,
++                info.model,
++                info.device_type.enum_value_or_default(),
++            );
++            self.device_directory.insert(id.clone(), label);
++        }
++    }
++
++    /// DIAG: resolve a device GUID to its friendly label, if known.
++    fn diag_device_label(&self, device_id: &str) -> String {
++        if device_id.is_empty() {
++            return "none".to_string();
++        }
++        match self.device_directory.get(device_id) {
++            Some(label) => label.clone(),
++            None => "unknown device".to_string(),
++        }
++    }
++
+     async fn handle_connect_state_request(
+         &mut self,
+         (request, sender): RequestReply,
+     ) -> Result<(), Error> {
+         self.connect_state.set_last_command(request.clone());
+ 
+-        debug!(
+-            "handling: '{}' from {}",
+-            request.command, request.sent_by_device_id
++        info!(
++            "DIAG connect-state command '{}' from {} ({})",
++            request.command,
++            request.sent_by_device_id,
++            self.diag_device_label(&request.sent_by_device_id),
+         );
+ 
+         let response = match self.handle_request(request).await {
+@@ -1181,6 +1509,8 @@ impl SpircTask {
+     }
+ 
+     fn handle_transfer(&mut self, mut transfer: TransferState) -> Result<(), Error> {
++        self.pending_unavailable_tracks.clear();
++
+         let mut ctx_uri = match transfer.current_session.context.uri {
+             None => Err(SpircError::NoUri("transfer context"))?,
+             // can apparently happen when a state is transferred and was started with "uris" via the api
+@@ -1213,7 +1543,7 @@ impl SpircTask {
+ 
+         match ctx_uri {
+             Some(ref uri) => {
+-                self.context_resolver.add(ResolveContext::from_uri(
++                self.context_resolver.add_forced(ResolveContext::from_uri(
+                     uri.clone(),
+                     &fallback,
+                     ContextType::Default,
+@@ -1268,10 +1598,23 @@ impl SpircTask {
+ 
+         let is_playing = !transfer.playback.is_paused();
+ 
++        info!(
++            "DIAG transfer: will_start_playing={}, raw_is_paused={:?}, position_ms={}, autoplay={}, load_from_context_uri={}, ctx_uri={:?}, current_track=<{}>, feature_identifier={:?}, origin_device_identifier={:?}",
++            is_playing,
++            transfer.playback.is_paused,
++            position,
++            autoplay,
++            load_from_context_uri,
++            ctx_uri,
++            self.connect_state.current_track(|t| t.uri.clone()),
++            transfer.current_session.play_origin.feature_identifier,
++            transfer.current_session.play_origin.device_identifier,
++        );
++
+         if self.connect_state.current_track(|t| t.is_autoplay()) || autoplay {
+             if let Some(ctx_uri) = ctx_uri {
+                 debug!("currently in autoplay context, async resolving autoplay for {ctx_uri}");
+-                self.context_resolver.add(ResolveContext::from_uri(
++                self.context_resolver.add_forced(ResolveContext::from_uri(
+                     ctx_uri,
+                     fallback,
+                     ContextType::Autoplay,
+@@ -1304,6 +1647,7 @@ impl SpircTask {
+ 
+     async fn handle_disconnect(&mut self) -> Result<(), Error> {
+         self.context_resolver.clear();
++        self.pending_unavailable_tracks.clear();
+ 
+         self.play_status = SpircPlayStatus::Stopped {};
+         self.connect_state
+@@ -1496,7 +1840,8 @@ impl SpircTask {
+         } else {
+             debug!("resolving context for load command");
+             self.context_resolver.clear();
+-            self.context_resolver.add(ResolveContext::from_uri(
++            self.pending_unavailable_tracks.clear();
++            self.context_resolver.add_forced(ResolveContext::from_uri(
+                 &context_uri,
+                 fallback,
+                 update_context,
+diff --git a/core/src/dealer/manager.rs b/core/src/dealer/manager.rs
+index 98ea026..06b5ba5 100644
+--- a/core/src/dealer/manager.rs
++++ b/core/src/dealer/manager.rs
+@@ -2,7 +2,7 @@ use futures_core::Stream;
+ use futures_util::StreamExt;
+ use std::{pin::Pin, str::FromStr, sync::OnceLock};
+ use thiserror::Error;
+-use tokio::sync::mpsc;
++use tokio::sync::{mpsc, watch};
+ use tokio_stream::wrappers::UnboundedReceiverStream;
+ use url::Url;
+ 
+@@ -16,6 +16,7 @@ component! {
+     DealerManager: DealerManagerInner {
+         builder: OnceLock<Builder> = OnceLock::from(Builder::new()),
+         dealer: OnceLock<Dealer> = OnceLock::new(),
++        reconnect_tx: watch::Sender<u64> = watch::Sender::new(0),
+     }
+ }
+ 
+@@ -153,10 +154,12 @@ impl DealerManager {
+         // and the token is expired we will just get 401 error
+         let get_url = move || Self::get_url(session.clone());
+ 
++        let reconnect_tx = self.lock(|inner| inner.reconnect_tx.clone());
++
+         let dealer = self
+             .lock(move |inner| inner.builder.take())
+             .ok_or(DealerError::BuilderNotAvailable)?
+-            .launch(get_url, None)
++            .launch(get_url, None, reconnect_tx)
+             .await
+             .map_err(DealerError::LaunchFailure)?;
+ 
+@@ -171,4 +174,8 @@ impl DealerManager {
+             dealer.close().await
+         }
+     }
++
++    pub fn reconnect_receiver(&self) -> watch::Receiver<u64> {
++        self.lock(|inner| inner.reconnect_tx.subscribe())
++    }
+ }
+diff --git a/core/src/dealer/mod.rs b/core/src/dealer/mod.rs
+index ebaeeed..d83d8cf 100644
+--- a/core/src/dealer/mod.rs
++++ b/core/src/dealer/mod.rs
+@@ -21,6 +21,7 @@ use tokio::{
+     sync::{
+         Semaphore,
+         mpsc::{self, UnboundedReceiver},
++        watch,
+     },
+     task::JoinHandle,
+ };
+@@ -55,6 +56,10 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
+ const PING_TIMEOUT: Duration = Duration::from_secs(3);
+ 
+ const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
++// Bounds each step of a reconnect attempt (URL resolution and the TCP/TLS/
++// websocket handshake), so a blackholed connection can't stall reconnection
++// forever.
++const RECONNECT_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+ 
+ const DEALER_REQUEST_HANDLERS_POISON_MSG: &str =
+     "dealer request handlers mutex should not be poisoned";
+@@ -301,15 +306,25 @@ impl Builder {
+         handles(&self.request_handlers, &self.message_handlers, uri)
+     }
+ 
+-    pub fn launch_in_background<Fut, F>(self, get_url: F, proxy: Option<Url>) -> Dealer
++    pub fn launch_in_background<Fut, F>(
++        self,
++        get_url: F,
++        proxy: Option<Url>,
++        reconnect_tx: watch::Sender<u64>,
++    ) -> Dealer
+     where
+         Fut: Future<Output = GetUrlResult> + Send + 'static,
+         F: (Fn() -> Fut) + Send + 'static,
+     {
+-        create_dealer!(self, shared -> run(shared, None, get_url, proxy))
++        create_dealer!(self, shared -> run(shared, None, get_url, proxy, reconnect_tx))
+     }
+ 
+-    pub async fn launch<Fut, F>(self, get_url: F, proxy: Option<Url>) -> WsResult<Dealer>
++    pub async fn launch<Fut, F>(
++        self,
++        get_url: F,
++        proxy: Option<Url>,
++        reconnect_tx: watch::Sender<u64>,
++    ) -> WsResult<Dealer>
+     where
+         Fut: Future<Output = GetUrlResult> + Send + 'static,
+         F: (Fn() -> Fut) + Send + 'static,
+@@ -317,10 +332,10 @@ impl Builder {
+         let dealer = create_dealer!(self, shared -> {
+             // Try to connect.
+             let url = get_url().await?;
+-            let tasks = connect(&url, proxy.as_ref(), &shared).await?;
++            let tasks = connect(&url, proxy.as_ref(), &shared, None).await?;
+ 
+             // If a connection is established, continue in a background task.
+-            run(shared, Some(tasks), get_url, proxy)
++            run(shared, Some(tasks), get_url, proxy, reconnect_tx)
+         });
+ 
+         Ok(dealer)
+@@ -496,10 +511,15 @@ impl Dealer {
+ }
+ 
+ /// Initializes a connection and returns futures that will finish when the connection is closed/lost.
++///
++/// When `notify_reconnect` is set, it is bumped on the receive task before any
++/// message of the new connection is dispatched, so consumers can order their
++/// own state against the reconnect (e.g. "did I register before or after it?").
+ async fn connect(
+     address: &Url,
+     proxy: Option<&Url>,
+     shared: &Arc<DealerShared>,
++    notify_reconnect: Option<watch::Sender<u64>>,
+ ) -> WsResult<(JoinHandle<()>, JoinHandle<()>)> {
+     let host = address
+         .host_str()
+@@ -578,6 +598,11 @@ async fn connect(
+ 
+     // A task that receives messages from the web socket.
+     let receive_task = tokio::spawn(async {
++        if let Some(tx) = notify_reconnect {
++            warn!("Dealer reconnected; notifying consumers.");
++            tx.send_modify(|n| *n += 1);
++        }
++
+         let pong_received = AtomicBool::new(true);
+         let send_tx = send_tx;
+         let shared = shared;
+@@ -665,6 +690,7 @@ async fn run<F, Fut>(
+     initial_tasks: Option<(JoinHandle<()>, JoinHandle<()>)>,
+     mut get_url: F,
+     proxy: Option<Url>,
++    reconnect_tx: watch::Sender<u64>,
+ ) -> Result<(), Error>
+ where
+     Fut: Future<Output = GetUrlResult> + Send + 'static,
+@@ -672,12 +698,16 @@ where
+ {
+     let init_task = |t| Some(TimeoutOnDrop::new(t, WEBSOCKET_CLOSE_TIMEOUT));
+ 
++    let has_had_initial_connection = initial_tasks.is_some();
++
+     let mut tasks = if let Some((s, r)) = initial_tasks {
+         (init_task(s), init_task(r))
+     } else {
+         (None, None)
+     };
+ 
++    let mut has_connected = has_had_initial_connection;
++
+     while !shared.is_closed() {
+         match &mut tasks {
+             (Some(t0), Some(t1)) => {
+@@ -702,15 +732,51 @@ where
+                     () = shared.closed() => {
+                         break
+                     },
+-                    e = get_url() => e
+-                }?;
++                    result = tokio::time::timeout(RECONNECT_STEP_TIMEOUT, get_url()) => {
++                        match result {
++                            Ok(Ok(url)) => url,
++                            Ok(Err(e)) => {
++                                error!("Failed to resolve dealer URL: {e}");
++                                tokio::time::sleep(RECONNECT_INTERVAL).await;
++                                continue;
++                            }
++                            Err(_) => {
++                                error!("Timed out resolving dealer URL.");
++                                tokio::time::sleep(RECONNECT_INTERVAL).await;
++                                continue;
++                            }
++                        }
++                    }
++                };
++
++                let connect_result = select! {
++                    () = shared.closed() => break,
++                    r = tokio::time::timeout(
++                        RECONNECT_STEP_TIMEOUT,
++                        // Notify consumers of reconnects, but not of the very
++                        // first connection.
++                        connect(
++                            &url,
++                            proxy.as_ref(),
++                            &shared,
++                            has_connected.then(|| reconnect_tx.clone()),
++                        ),
++                    ) => r,
++                };
+ 
+-                match connect(&url, proxy.as_ref(), &shared).await {
+-                    Ok((s, r)) => tasks = (init_task(s), init_task(r)),
+-                    Err(e) => {
++                match connect_result {
++                    Ok(Ok((s, r))) => {
++                        tasks = (init_task(s), init_task(r));
++                        has_connected = true;
++                    }
++                    Ok(Err(e)) => {
+                         error!("Error while connecting: {e}");
+                         tokio::time::sleep(RECONNECT_INTERVAL).await;
+                     }
++                    Err(_) => {
++                        error!("Timed out connecting to dealer.");
++                        tokio::time::sleep(RECONNECT_INTERVAL).await;
++                    }
+                 }
+             }
+         }
+diff --git a/core/src/http_client.rs b/core/src/http_client.rs
+index 03af57e..b7dcaa7 100644
+--- a/core/src/http_client.rs
++++ b/core/src/http_client.rs
+@@ -40,6 +40,15 @@ pub const RATE_LIMIT_INTERVAL: Duration = Duration::from_secs(30);
+ pub const RATE_LIMIT_MAX_WAIT: Duration = Duration::from_secs(10);
+ pub const RATE_LIMIT_CALLS_PER_INTERVAL: u32 = 300;
+ 
++// Upper bound for receiving the response headers of a request, and for the
++// stall between response body frames (not the whole transfer, so that large
++// downloads over slow links can still complete). Control-plane requests
++// (spclient, apresolve, login5) normally complete in well under a second; this
++// only exists to convert a hung request over a half-open connection into a
++// retryable error, so callers such as the spirc event loop can't be blocked
++// forever. Audio streaming does not go through here.
++pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
++
+ #[derive(Debug, Error)]
+ pub enum HttpClientError {
+     #[error("Response status code: {0}")]
+@@ -70,7 +79,8 @@ impl From<HttpClientError> for Error {
+                     | StatusCode::PRECONDITION_FAILED
+                     | StatusCode::PRECONDITION_REQUIRED => Error::failed_precondition(err),
+                     StatusCode::RANGE_NOT_SATISFIABLE => Error::out_of_range(err),
+-                    StatusCode::INTERNAL_SERVER_ERROR
++                    StatusCode::BAD_GATEWAY
++                    | StatusCode::INTERNAL_SERVER_ERROR
+                     | StatusCode::MISDIRECTED_REQUEST
+                     | StatusCode::SERVICE_UNAVAILABLE
+                     | StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS => Error::unavailable(err),
+@@ -195,7 +205,20 @@ impl HttpClient {
+             *req.headers_mut() = parts.headers.clone();
+ 
+             let request = self.request_fut(req)?;
+-            let response = request.await;
++            let response = match tokio::time::timeout(REQUEST_TIMEOUT, request).await {
++                Ok(response) => response,
++                Err(_) => {
++                    warn!(
++                        "Request to {} timed out after {}s",
++                        parts.uri,
++                        REQUEST_TIMEOUT.as_secs()
++                    );
++                    return Err(Error::deadline_exceeded(format!(
++                        "HTTP request timed out after {}s",
++                        REQUEST_TIMEOUT.as_secs()
++                    )));
++                }
++            };
+ 
+             if let Ok(response) = &response {
+                 let code = response.status();
+@@ -223,7 +246,29 @@ impl HttpClient {
+ 
+     pub async fn request_body(&self, req: Request<Bytes>) -> Result<Bytes, Error> {
+         let response = self.request(req).await?;
+-        Ok(response.into_body().collect().await?.to_bytes())
++
++        // Time out when the body stream stalls, not on total transfer time:
++        // large payloads (e.g. audio previews) may legitimately take longer
++        // than any fixed whole-body deadline on slow links.
++        let mut body = response.into_body();
++        let mut bytes = Vec::new();
++        loop {
++            match tokio::time::timeout(REQUEST_TIMEOUT, body.frame()).await {
++                Ok(Some(frame)) => {
++                    if let Some(data) = frame?.data_ref() {
++                        bytes.extend_from_slice(data);
++                    }
++                }
++                Ok(None) => break,
++                Err(_) => {
++                    return Err(Error::deadline_exceeded(format!(
++                        "HTTP response body stalled for {}s",
++                        REQUEST_TIMEOUT.as_secs()
++                    )));
++                }
++            }
++        }
++        Ok(bytes.into())
+     }
+ 
+     pub fn request_stream(&self, req: Request<Bytes>) -> Result<IntoStream<ResponseFuture>, Error> {
+diff --git a/core/src/socket.rs b/core/src/socket.rs
+index 87fcd8e..4477f67 100644
+--- a/core/src/socket.rs
++++ b/core/src/socket.rs
+@@ -1,19 +1,47 @@
+ use std::io;
++use std::net::SocketAddr;
++use std::time::Duration;
+ 
+ use tokio::net::TcpStream;
+ use url::Url;
+ 
+ use crate::proxytunnel;
+ 
++// Bounds each address attempt so one blackholed address (e.g. an IPv6 route
++// that silently drops SYNs) can't consume the caller's entire timeout budget
++// before the remaining addresses (e.g. IPv4) get a chance.
++const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
++
++async fn connect_attempts(addrs: impl Iterator<Item = SocketAddr>) -> io::Result<TcpStream> {
++    let mut last_err = None;
++
++    for addr in addrs {
++        match tokio::time::timeout(CONNECT_ATTEMPT_TIMEOUT, TcpStream::connect(addr)).await {
++            Ok(Ok(stream)) => return Ok(stream),
++            Ok(Err(e)) => last_err = Some(e),
++            Err(_) => {
++                last_err = Some(io::Error::new(
++                    io::ErrorKind::TimedOut,
++                    format!("connection to {addr} timed out"),
++                ))
++            }
++        }
++    }
++
++    Err(last_err
++        .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no addresses to connect to")))
++}
++
+ pub async fn connect(host: &str, port: u16, proxy: Option<&Url>) -> io::Result<TcpStream> {
+     if let Some(proxy_url) = proxy {
+         info!("Using proxy \"{proxy_url}\"");
+ 
+         let socket_addrs = proxy_url.socket_addrs(|| None)?;
+-        let socket = TcpStream::connect(&*socket_addrs).await?;
++        let socket = connect_attempts(socket_addrs.into_iter()).await?;
+ 
+         proxytunnel::proxy_connect(socket, host, &port.to_string()).await
+     } else {
+-        TcpStream::connect((host, port)).await
++        let socket_addrs = tokio::net::lookup_host((host, port)).await?;
++        connect_attempts(socket_addrs).await
+     }
+ }
+diff --git a/examples/play_connect.rs b/examples/play_connect.rs
+index 1be6345..044865c 100644
+--- a/examples/play_connect.rs
++++ b/examples/play_connect.rs
+@@ -71,7 +71,7 @@ async fn main() -> Result<(), Error> {
+     spirc.play()?;
+ 
+     // starting the connect device and processing the previously "queued" calls
+-    spirc_task.await;
++    let _ = spirc_task.await;
+ 
+     Ok(())
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 43806dd..5286d09 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1913,6 +1913,11 @@ async fn main() {
+     const RECONNECT_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(600);
+     const DISCOVERY_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+     const RECONNECT_RATE_LIMIT: usize = 5;
++    // When spirc restarts to recover playback (session loss or reconnect
++    // watchdog) faster than the rate limit allows, delay the next attempt by
++    // this much instead of exiting — exiting would kill playback that is
++    // otherwise still running.
++    const RECOVERY_RECONNECT_BACKOFF: Duration = Duration::from_secs(120);
+ 
+     if env::var(RUST_BACKTRACE).is_err() {
+         set_env_var(RUST_BACKTRACE, "full").await;
+@@ -1927,6 +1932,8 @@ async fn main() {
+     let mut discovery = None;
+     let mut connecting = false;
+     let mut _event_handler: Option<EventHandler> = None;
++    let mut saved_playback_state = None;
++    let mut reconnect_backoff_until: Option<tokio::time::Instant> = None;
+ 
+     let mut session = Session::new(setup.session_config.clone(), setup.cache.clone());
+ 
+@@ -2052,6 +2059,10 @@ async fn main() {
+     }
+ 
+     loop {
++        // Copied out so the reconnect arm below doesn't borrow the variable
++        // it assigns.
++        let reconnect_backoff = reconnect_backoff_until;
++
+         tokio::select! {
+             credentials = async {
+                 match discovery.as_mut() {
+@@ -2064,6 +2075,12 @@ async fn main() {
+                         last_credentials = Some(credentials.clone());
+                         auto_connect_times.clear();
+ 
++                        // New account via Discovery — discard any saved
++                        // playback state from the previous account and
++                        // reconnect right away.
++                        saved_playback_state = None;
++                        reconnect_backoff_until = None;
++
+                         if let Some(spirc) = spirc.take() {
+                             if let Err(e) = spirc.shutdown() {
+                                 error!("error sending spirc shutdown message: {e}");
+@@ -2085,7 +2102,12 @@ async fn main() {
+                     }
+                 }
+             },
+-            _ = async {}, if connecting && last_credentials.is_some() => {
++            _ = async {
++                if let Some(deadline) = reconnect_backoff {
++                    tokio::time::sleep_until(deadline).await
++                }
++            }, if connecting && last_credentials.is_some() => {
++                reconnect_backoff_until = None;
+                 if session.is_invalid() {
+                     session = Session::new(setup.session_config.clone(), setup.cache.clone());
+                     player.set_session(session.clone());
+@@ -2093,11 +2115,14 @@ async fn main() {
+ 
+                 let connect_config = setup.connect_config.clone();
+ 
+-                let (spirc_, spirc_task_) = match Spirc::new(connect_config,
+-                                                                session.clone(),
+-                                                                last_credentials.clone().unwrap_or_default(),
+-                                                                player.clone(),
+-                                                                mixer.clone()).await {
++                let (spirc_, spirc_task_) = match Spirc::with_saved_state(
++                    connect_config,
++                    session.clone(),
++                    last_credentials.clone().unwrap_or_default(),
++                    player.clone(),
++                    mixer.clone(),
++                    saved_playback_state.take(),
++                ).await {
+                     Ok((spirc_, spirc_task_)) => (spirc_, spirc_task_),
+                     Err(e) => {
+                         error!("could not initialize spirc: {e}");
+@@ -2109,30 +2134,50 @@ async fn main() {
+ 
+                 connecting = false;
+             },
+-            _ = async {
+-                if let Some(task) = spirc_task.as_mut() {
+-                    task.await;
++            saved = async {
++                match spirc_task.as_mut() {
++                    Some(task) => task.await,
++                    None => None,
+                 }
+             }, if spirc_task.is_some() && !connecting => {
+                 spirc_task = None;
++                saved_playback_state = saved;
+ 
+-                warn!("Spirc shut down unexpectedly");
++                if saved_playback_state.is_some() {
++                    info!("Spirc shut down with saved playback state, reconnecting");
++                } else {
++                    warn!("Spirc shut down unexpectedly");
++                }
+ 
+                 let mut reconnect_exceeds_rate_limit = || {
+                     auto_connect_times.retain(|&t| t.elapsed() < RECONNECT_RATE_LIMIT_WINDOW);
+                     auto_connect_times.len() > RECONNECT_RATE_LIMIT
+                 };
+ 
+-                if last_credentials.is_some() && !reconnect_exceeds_rate_limit() {
+-                    auto_connect_times.push(Instant::now());
+-                    if !session.is_invalid() {
+-                        session.shutdown();
+-                    }
+-                    connecting = true;
+-                } else {
++                if last_credentials.is_none()
++                    || (reconnect_exceeds_rate_limit() && saved_playback_state.is_none())
++                {
+                     error!("Spirc shut down too often. Not reconnecting automatically.");
+                     exit(1);
+                 }
++
++                if reconnect_exceeds_rate_limit() {
++                    // Restarting faster than the rate limit allows, but with
++                    // playback to preserve: back off and keep trying instead
++                    // of exiting.
++                    warn!(
++                        "Spirc restarting too often; delaying reconnect by {}s",
++                        RECOVERY_RECONNECT_BACKOFF.as_secs()
++                    );
++                    reconnect_backoff_until =
++                        Some(tokio::time::Instant::now() + RECOVERY_RECONNECT_BACKOFF);
++                }
++
++                auto_connect_times.push(Instant::now());
++                if !session.is_invalid() {
++                    session.shutdown();
++                }
++                connecting = true;
+             },
+             _ = async {}, if player.is_invalid() => {
+                 error!("Player shut down unexpectedly");
+@@ -2156,7 +2201,9 @@ async fn main() {
+         }
+ 
+         if let Some(spirc_task) = spirc_task {
+-            shutdown_tasks.spawn(spirc_task);
++            shutdown_tasks.spawn(async {
++                let _ = spirc_task.await;
++            });
+         }
+     }
+ 

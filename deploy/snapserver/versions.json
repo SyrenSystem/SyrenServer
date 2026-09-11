@@ -1,0 +1,16 @@
+{
+  "checked": "2026-09-09",
+  "librespot_release": "0.8.0",
+  "librespot_revision": "a1b66d3c8a14e55a9572a9e17467150dca618c9a",
+  "recovery_pull_request": "https://github.com/librespot-org/librespot/pull/1692",
+  "recovery_revision": "b08a5f77df17dddfa7fb7869c56a6c5b59c8512b",
+  "recovery_patch_sha256": "84feb69333560c9dda8e97028503c38a21c7d2522cac9844775e8388c6157dc4",
+  "snapserver": "0.35.0-1",
+  "snapserver_sha256": "6a82325cf9eae68b75fb062491639cb31ec58288fe8930f53e86689e22a095da",
+  "snapclient": "0.35.0-1",
+  "snapclient_arm64_pulse_sha256": "541d3cbf886d0715c2ae7a7e6ecdfcec076039b7792f36418ba308075ef23bb1",
+  "rust": "1.98.1",
+  "snapserver_revision": "f12373479243e93a97237592d6a3703539ec41d5",
+  "snapserver_lifecycle_patch_sha256": "dd3189879fc11d88b598120ae282d69420275332ce59fbe0d46dd9a74cba462b",
+  "mosquitto": "2.1.2-alpine"
+}

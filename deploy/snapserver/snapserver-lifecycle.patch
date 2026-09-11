@@ -1,0 +1,218 @@
+diff --git a/server/streamreader/meta_stream.cpp b/server/streamreader/meta_stream.cpp
+index 56442f1..6998ea1 100644
+--- a/server/streamreader/meta_stream.cpp
++++ b/server/streamreader/meta_stream.cpp
+@@ -50,7 +50,6 @@ MetaStream::MetaStream(PcmStream::Listener* pcmListener, const std::vector<std::
+             if (stream->getName() == component)
+             {
+                 streams_.push_back(stream);
+-                stream->addListener(this);
+                 found = true;
+                 break;
+             }
+@@ -77,17 +76,23 @@ void MetaStream::start()
+ {
+     LOG(DEBUG, LOG_TAG) << "Start, sampleformat: " << sampleFormat_.toString() << "\n";
+     PcmStream::start();
++    for (const auto& stream : streams_)
++        stream->addListener(std::dynamic_pointer_cast<PcmStream::Listener>(shared_from_this()));
+ }
+ 
+ 
+ void MetaStream::stop()
+ {
+     active_ = false;
++    for (const auto& stream : streams_)
++        stream->removeListener(this);
+ }
+ 
+ 
+ void MetaStream::onPropertiesChanged(const PcmStream* pcmStream, const Properties& properties)
+ {
++    if (!active_)
++        return;
+     LOG(DEBUG, LOG_TAG) << "onPropertiesChanged: " << pcmStream->getName() << "\n";
+     // std::lock_guard<std::recursive_mutex> lock(mutex_);
+     if (pcmStream != active_stream_.get())
+@@ -98,6 +103,8 @@ void MetaStream::onPropertiesChanged(const PcmStream* pcmStream, const Propertie
+ 
+ void MetaStream::onStateChanged(const PcmStream* pcmStream, ReaderState state)
+ {
++    if (!active_)
++        return;
+     LOG(DEBUG, LOG_TAG) << "onStateChanged: " << pcmStream->getName() << ", state: " << state << "\n";
+     std::lock_guard<std::recursive_mutex> lock(active_mutex_);
+ 
+@@ -140,6 +147,8 @@ void MetaStream::onStateChanged(const PcmStream* pcmStream, ReaderState state)
+ 
+ void MetaStream::onChunkRead(const PcmStream* pcmStream, const msg::PcmChunk& chunk)
+ {
++    if (!active_)
++        return;
+     // LOG(TRACE, LOG_TAG) << "onChunkRead: " << pcmStream->getName() << ", duration: " << chunk.durationMs() << "\n";
+     // std::lock_guard<std::recursive_mutex> lock(mutex_);
+     std::lock_guard<std::recursive_mutex> lock(active_mutex_);
+@@ -199,6 +208,8 @@ void MetaStream::onChunkEncoded(const PcmStream* pcmStream, std::shared_ptr<msg:
+ 
+ void MetaStream::onResync(const PcmStream* pcmStream, double ms)
+ {
++    if (!active_)
++        return;
+     LOG(DEBUG, LOG_TAG) << "onResync: " << pcmStream->getName() << ", duration: " << ms << " ms\n";
+     // std::lock_guard<std::recursive_mutex> lock(mutex_);
+     if (pcmStream != active_stream_.get())
+diff --git a/server/streamreader/pcm_stream.cpp b/server/streamreader/pcm_stream.cpp
+index 48fa5a7..c4c098e 100644
+--- a/server/streamreader/pcm_stream.cpp
++++ b/server/streamreader/pcm_stream.cpp
+@@ -35,6 +35,7 @@
+ #include <boost/asio/ip/host_name.hpp>
+ 
+ // standard headers
++#include <algorithm>
+ #include <memory>
+ 
+ 
+@@ -47,7 +48,7 @@ static constexpr auto LOG_TAG = "PcmStream";
+ 
+ 
+ PcmStream::PcmStream(PcmStream::Listener* pcmListener, boost::asio::io_context& ioc, ServerSettings server_settings, StreamUri uri, Source source)
+-    : active_(false), strand_(boost::asio::make_strand(ioc.get_executor())), pcmListeners_{pcmListener}, uri_(std::move(uri)), chunk_ms_(20),
++    : active_(false), strand_(boost::asio::make_strand(ioc.get_executor())), primary_listener_(pcmListener), uri_(std::move(uri)), chunk_ms_(20),
+       state_(ReaderState::kIdle), server_settings_(std::move(server_settings)), req_id_(0), property_timer_(strand_)
+ {
+     std::ignore = source;
+@@ -323,8 +324,9 @@ void PcmStream::setState(ReaderState newState)
+     {
+         LOG(INFO, LOG_TAG) << "State changed: " << name_ << ", state: " << state_ << " => " << newState << "\n";
+         state_ = newState;
+-        for (auto* listener : pcmListeners_)
++        for (const auto& reference : getListeners())
+         {
++            auto* listener = reference.listener;
+             if (listener != nullptr)
+                 listener->onStateChanged(this, newState);
+         }
+@@ -347,8 +349,9 @@ void PcmStream::chunkEncoded(const encoder::Encoder& encoder, const std::shared_
+ 
+     // update tvEncodedChunk_ to the next chunk start by adding the current chunk duration
+     tvEncodedChunk_ += std::chrono::nanoseconds(static_cast<std::chrono::nanoseconds::rep>(duration * 1000000));
+-    for (auto* listener : pcmListeners_)
++    for (const auto& reference : getListeners())
+     {
++        auto* listener = reference.listener;
+         if (listener != nullptr)
+             listener->onChunkEncoded(this, chunk, duration);
+     }
+@@ -357,8 +360,9 @@ void PcmStream::chunkEncoded(const encoder::Encoder& encoder, const std::shared_
+ 
+ void PcmStream::chunkRead(const msg::PcmChunk& chunk)
+ {
+-    for (auto* listener : pcmListeners_)
++    for (const auto& reference : getListeners())
+     {
++        auto* listener = reference.listener;
+         if (listener != nullptr)
+             listener->onChunkRead(this, chunk);
+     }
+@@ -368,8 +372,9 @@ void PcmStream::chunkRead(const msg::PcmChunk& chunk)
+ 
+ void PcmStream::resync(const std::chrono::nanoseconds& duration)
+ {
+-    for (auto* listener : pcmListeners_)
++    for (const auto& reference : getListeners())
+     {
++        auto* listener = reference.listener;
+         if (listener != nullptr)
+             listener->onResync(this, duration.count() / 1000000.);
+     }
+@@ -391,9 +396,32 @@ json PcmStream::toJson() const
+ }
+ 
+ 
+-void PcmStream::addListener(PcmStream::Listener* pcmListener)
++void PcmStream::addListener(const std::shared_ptr<PcmStream::Listener>& listener)
+ {
+-    pcmListeners_.push_back(pcmListener);
++    std::lock_guard<std::mutex> listener_lock(listener_mutex_);
++    pcmListeners_.push_back(listener);
++}
++
++void PcmStream::removeListener(PcmStream::Listener* listener)
++{
++    std::lock_guard<std::mutex> listener_lock(listener_mutex_);
++    pcmListeners_.erase(std::remove_if(pcmListeners_.begin(), pcmListeners_.end(), [listener](const auto& reference)
++    {
++        auto owner = reference.lock();
++        return !owner || owner.get() == listener;
++    }), pcmListeners_.end());
++}
++
++std::vector<PcmStream::ListenerReference> PcmStream::getListeners()
++{
++    std::lock_guard<std::mutex> listener_lock(listener_mutex_);
++    std::vector<ListenerReference> listeners{{primary_listener_, nullptr}};
++    for (const auto& reference : pcmListeners_)
++    {
++        if (auto owner = reference.lock())
++            listeners.push_back({owner.get(), std::move(owner)});
++    }
++    return listeners;
+ }
+ 
+ 
+@@ -597,8 +625,9 @@ void PcmStream::setProperties(const Properties& properties)
+     LOG(DEBUG, LOG_TAG) << "setProperties, stream: " << getId() << ", properties: " << properties_.toJson() << "\n";
+ 
+     // Trigger a stream update
+-    for (auto* listener : pcmListeners_)
++    for (const auto& reference : getListeners())
+     {
++        auto* listener = reference.listener;
+         if (listener != nullptr)
+             listener->onPropertiesChanged(this, properties_);
+     }
+diff --git a/server/streamreader/pcm_stream.hpp b/server/streamreader/pcm_stream.hpp
+index 2d37b4a..449770a 100644
+--- a/server/streamreader/pcm_stream.hpp
++++ b/server/streamreader/pcm_stream.hpp
+@@ -194,7 +194,8 @@ public:
+     virtual json toJson() const;
+ 
+     /// Add a pcm listener
+-    void addListener(PcmStream::Listener* pcmListener);
++    void addListener(const std::shared_ptr<PcmStream::Listener>& listener);
++    void removeListener(PcmStream::Listener* listener);
+ 
+ protected:
+     /// Stream is active (started?
+@@ -233,7 +234,15 @@ protected:
+     /// Current abolute time of the last encoded chunk
+     std::chrono::time_point<std::chrono::steady_clock> tvEncodedChunk_;
+     /// Listeners for PCM events
+-    std::vector<PcmStream::Listener*> pcmListeners_;
++    PcmStream::Listener* primary_listener_;
++    std::vector<std::weak_ptr<PcmStream::Listener>> pcmListeners_;
++    std::mutex listener_mutex_;
++    struct ListenerReference
++    {
++        PcmStream::Listener* listener;
++        std::shared_ptr<PcmStream::Listener> owner;
++    };
++    std::vector<ListenerReference> getListeners();
+     /// URI of this stream
+     StreamUri uri_;
+     /// Sampleformat of this stream
+diff --git a/server/streamreader/stream_manager.cpp b/server/streamreader/stream_manager.cpp
+index 62bc8d4..9972bf7 100644
+--- a/server/streamreader/stream_manager.cpp
++++ b/server/streamreader/stream_manager.cpp
+@@ -176,7 +176,7 @@ bool StreamManager::removeStream(const std::string& name)
+     {
+         (*iter)->stop();
+         streams_.erase(iter);
+-        LOG(DEBUG, LOG_TAG) << "Found and removed stream '" << (*iter)->getName() << "'\n";
++        LOG(DEBUG, LOG_TAG) << "Found and removed stream '" << name << "'\n";
+         return true;
+     }
+     else
