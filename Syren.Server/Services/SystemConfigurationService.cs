@@ -299,6 +299,10 @@ public sealed class SystemConfigurationService : BackgroundService, ISystemConfi
     {
         PersistentSystemState current = _stateStore.Current;
         SnapServerStatus status = await _snapCastService.GetStatusAsync(cancellationToken);
+        if (current.Version == 3)
+        {
+            return CreateRuntime(status);
+        }
         var requiredStreams = current.Groups
             .Select(group => (Group: group, StreamId: GetPriorityStreamId(group.SourcePriority)))
             .ToArray();
@@ -580,7 +584,14 @@ public sealed class SystemConfigurationService : BackgroundService, ISystemConfi
                     {
                         throw new ConfigurationRevisionException();
                     }
-                    return mutation(current);
+                    PersistentSystemState changed = mutation(current);
+                    return current.Version == 3 ? changed with
+                    {
+                        CatalogueRevision = checked(current.CatalogueRevision + 1),
+                        Sessions = changed.Sessions.Select(session => session.Destination != "house" && session.State != "ended" &&
+                            !changed.Groups.Any(group => group.Id == session.Destination && group.SourcePriority.Contains(session.Source))
+                            ? session.End() : session).ToList(),
+                    } : changed;
                 });
                 await _distanceService.ApplyCurrentVolumesAsync(reportedVolumes: null, cancellationToken);
                 if (signalReconcile)

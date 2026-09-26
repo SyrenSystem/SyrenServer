@@ -15,6 +15,14 @@ COPY librespot-recovery.patch /tmp/librespot-recovery.patch
 RUN git apply --check /tmp/librespot-recovery.patch \
     && git apply /tmp/librespot-recovery.patch
 
+COPY librespot-device-id.patch /tmp/librespot-device-id.patch
+RUN git apply --check /tmp/librespot-device-id.patch \
+    && git apply /tmp/librespot-device-id.patch
+
+COPY librespot-session-events.patch /tmp/librespot-session-events.patch
+RUN git apply --check /tmp/librespot-session-events.patch \
+    && git apply /tmp/librespot-session-events.patch
+
 RUN cargo test --locked --workspace \
     --no-default-features \
     --features rustls-tls-webpki-roots,with-libmdns
@@ -42,13 +50,16 @@ RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_CLIENT=OFF -
 COPY smoke_snapserver.py /tmp/smoke_snapserver.py
 RUN python3 /tmp/smoke_snapserver.py --executable /source/snapcast/bin/snapserver
 
+COPY spotify_destination_probe.py spotify_sessions.py spotify_supervisor.py test_spotify_destination_probe.py test_spotify_sessions.py test_spotify_control.py /tmp/spotify-probe/
+RUN python3 -m unittest discover -s /tmp/spotify-probe -p 'test_*.py' -v
+
 FROM docker.io/library/debian:13-slim
 
 ARG SNAPSERVER_URL=https://github.com/snapcast/snapcast/releases/download/v0.35.0/snapserver_0.35.0-1_amd64_trixie.deb
 ARG SNAPSERVER_SHA256=6a82325cf9eae68b75fb062491639cb31ec58288fe8930f53e86689e22a095da
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl iproute2 \
+    && apt-get install --yes --no-install-recommends ca-certificates curl iproute2 python3 python3-paho-mqtt \
     && curl --fail --location --retry 3 "$SNAPSERVER_URL" --output /tmp/snapserver.deb \
     && echo "$SNAPSERVER_SHA256  /tmp/snapserver.deb" | sha256sum --check \
     && apt-get install --yes --no-install-recommends /tmp/snapserver.deb \
@@ -63,6 +74,8 @@ COPY --from=snapserver-builder /source/snapcast/bin/snapserver /usr/bin/snapserv
 COPY versions.json /usr/share/syrensystem/audio-versions.json
 COPY snapserver.conf /etc/snapserver.conf
 COPY --chmod=755 start-snapserver.sh /usr/local/bin/start-snapserver
+
+COPY --chmod=755 spotify_event.py spotify_sessions.py spotify_supervisor.py start-profile-audio.py /usr/local/bin/
 
 USER snapserver
 

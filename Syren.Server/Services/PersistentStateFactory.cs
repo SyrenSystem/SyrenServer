@@ -184,10 +184,12 @@ internal static class PersistentStateFactory
 
     public static void Validate(PersistentSystemState state)
     {
-        if (state.Version != 2)
+        if (state.Version is not (2 or 3))
         {
             throw new InvalidDataException($"Unsupported system state version {state.Version}");
         }
+
+        ProfilePlaybackValidation.Validate(state);
 
         if (!Guid.TryParse(state.StateId, out _))
         {

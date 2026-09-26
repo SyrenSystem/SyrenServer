@@ -10,6 +10,7 @@ public sealed class PlaybackOptions
     public string SampleFormat { get; set; } = "48000:16:2";
     public string Codec { get; set; } = "pcm";
     public int ReconcileSeconds { get; set; } = 5;
+    public bool ProfileSessions { get; set; }
 }
 
 public sealed class AudioSourceOption

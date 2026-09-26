@@ -183,7 +183,8 @@ public sealed class ConfigurationPublisher : IConfigurationPublisher, IHostedSer
     {
         await _mqttClientService.PublishAsync(
             _options.ServerStatusTopic,
-            ServerStatusMessage.Create(_session.Id, _distanceService.StateId, online: true, connectedSpeakerIds),
+            ServerStatusMessage.Create(_session.Id, _distanceService.StateId, online: true, connectedSpeakerIds,
+                _stateStore.Current.Version == 3 ? 3 : null),
             retain: true,
             cancellationToken: cancellationToken
         );

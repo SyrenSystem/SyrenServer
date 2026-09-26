@@ -1,0 +1,9 @@
+services:
+  snapserver:
+    image: localhost/syren-snapserver-profiles
+    environment:
+      SYREN_PROFILE_SESSIONS: "1"
+  syren-server:
+    image: localhost/syren-server-profiles
+    environment:
+      Playback__ProfileSessions: "true"

@@ -21,6 +21,39 @@ public sealed record PersistentSystemState
 
     [JsonPropertyName("retiredSensorIds")]
     public List<string> RetiredSensorIds { get; init; } = [];
+
+    [JsonPropertyName("profiles")]
+    public List<ListenerProfile> Profiles { get; init; } = [];
+
+    [JsonPropertyName("sourcePolicies")]
+    public Dictionary<string, string> SourcePolicies { get; init; } = new()
+    {
+        ["spotify"] = "playing", ["laptop"] = "connected", ["casting"] = "connected",
+    };
+
+    [JsonPropertyName("sessions")]
+    public List<PlaybackSession> Sessions { get; init; } = [];
+
+    [JsonPropertyName("claimSequence")]
+    public long ClaimSequence { get; init; }
+
+    [JsonPropertyName("catalogueRevision")]
+    public long CatalogueRevision { get; init; }
+
+    [JsonPropertyName("generation")]
+    public long Generation { get; init; }
+
+    [JsonPropertyName("playbackActivated")]
+    public bool PlaybackActivated { get; init; }
+
+    [JsonPropertyName("receiverEpochs")]
+    public Dictionary<string, long> ReceiverEpochs { get; init; } = [];
+
+    [JsonPropertyName("positionOwners")]
+    public List<PositionReporterOwner> PositionOwners { get; init; } = [];
+
+    [JsonPropertyName("selectionSequences")]
+    public Dictionary<string, long> SelectionSequences { get; init; } = [];
 }
 
 public sealed record PersistentSpeakerState

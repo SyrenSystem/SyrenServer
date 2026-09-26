@@ -3,6 +3,13 @@ set -eu
 
 server_directory="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 compose_file="$server_directory/compose.yaml"
+profile_compose=""
+if [ "${1:-}" = "--profile-sessions" ]; then
+  profile_compose="-f $server_directory/compose.profiles.yaml"
+elif [ "$#" -gt 0 ]; then
+  printf '%s\n' 'Usage: install-user-services.sh [--profile-sessions]' >&2
+  exit 1
+fi
 user_service_directory="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 audio_configuration_directory="${XDG_CONFIG_HOME:-$HOME/.config}/syrensystem"
 service_template="$server_directory/deploy/systemd/syrensystem-stack.service.in"
@@ -19,9 +26,11 @@ mkdir -p "$user_service_directory" "$audio_configuration_directory"
 
 escaped_server_directory="$(printf '%s' "$server_directory" | sed 's/[&|]/\\&/g')"
 escaped_compose_file="$(printf '%s' "$compose_file" | sed 's/[&|]/\\&/g')"
+escaped_profile_compose="$(printf '%s' "$profile_compose" | sed 's/[&|]/\\&/g')"
 sed \
   -e "s|__SERVER_DIRECTORY__|$escaped_server_directory|g" \
   -e "s|__COMPOSE_FILE__|$escaped_compose_file|g" \
+  -e "s|__PROFILE_COMPOSE__|$escaped_profile_compose|g" \
   "$service_template" > "$service_file"
 
 if [ ! -f "$audio_configuration_directory/audio-sender.conf" ]; then
@@ -31,11 +40,20 @@ if [ ! -f "$audio_configuration_directory/audio-sender.conf" ]; then
     > "$audio_configuration_directory/audio-sender.conf"
 fi
 
-podman-compose -f "$compose_file" build
+if [ -n "$profile_compose" ]; then
+  podman-compose -f "$compose_file" -f "$server_directory/compose.profiles.yaml" build
+else
+  podman-compose -f "$compose_file" build
+fi
 systemctl --user daemon-reload
 systemctl --user enable syrensystem-stack.service
 systemctl --user restart syrensystem-stack.service
-if systemctl --user cat syren-laptop-audio.service >/dev/null 2>&1; then
+if [ -n "$profile_compose" ]; then
+  systemctl --user disable --now syren-laptop-audio.service >/dev/null 2>&1 || true
+  if command -v syren-audio-control >/dev/null 2>&1; then
+    syren-audio-control disable
+  fi
+elif systemctl --user cat syren-laptop-audio.service >/dev/null 2>&1; then
   missing_audio_command=""
   for required_command in pactl pw-record nc; do
     if ! command -v "$required_command" >/dev/null 2>&1; then

@@ -15,4 +15,5 @@ public interface ISnapCastService
     Task SetGroupMuteAsync(string id, bool muted, CancellationToken cancellationToken = default);
     Task<string> AddStreamAsync(string streamUri, CancellationToken cancellationToken = default);
     Task RemoveStreamAsync(string streamId, CancellationToken cancellationToken = default);
+    Task DeleteClientAsync(string id, CancellationToken cancellationToken = default);
 }

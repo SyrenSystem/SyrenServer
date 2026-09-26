@@ -43,4 +43,5 @@ public interface IMqttClientService
     /// Check if the client is connected
     /// </summary>
     bool IsConnected { get; }
+    long ConnectionEpoch => 0;
 }

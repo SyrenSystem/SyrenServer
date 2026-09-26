@@ -10,6 +10,42 @@ namespace Syren.Server.Tests;
 public sealed class SystemStateStoreTests
 {
     [Fact]
+    public void ProfileMigrationKeepsCalibrationLevelsAndAnExactVersionTwoBackup()
+    {
+        using var directory = new TemporaryDirectory();
+        var original = CreateStore(directory.StatePath, new SpeakersOptions { SpeakersInfo = [Speaker("sensor", "client")] });
+        original.Save(original.Current with
+        {
+            Speakers = original.Current.Speakers.Select(speaker => speaker with { Volume = 37, FullVolumeDistance = 777, MuteDistance = 4444 }).ToList(),
+            Groups = [PersistentStateFactory.CreateDefaultGroup(original.Current.Speakers.Select(speaker => speaker.SpeakerId!).ToArray(), TestServices.SourceIds, "automatic")
+                with { SourcePriority = ["laptop", "spotify"], MasterVolume = 43, Muted = true,
+                    SourceLevels = new() { ["spotify"] = 25, ["laptop"] = 85 } }],
+        });
+        string saved = File.ReadAllText(directory.StatePath);
+        var options = Options.Create(new PlaybackOptions { Sources = [new() { Id = "spotify", Name = "Spotify" },
+            new() { Id = "laptop", Name = "PC audio" }], ProfileSessions = true });
+        SystemStateStore Load() => new(Options.Create(new StateOptions { FilePath = directory.StatePath }),
+            Options.Create(new SpeakersOptions()), options, NullLogger<SystemStateStore>.Instance);
+        var migrated = Load();
+        Assert.Equal(3, migrated.Current.Version);
+        Assert.Empty(migrated.Current.Profiles);
+        Assert.False(migrated.Current.PlaybackActivated);
+        Assert.Equal(original.Current.StateId, migrated.Current.StateId);
+        Assert.Equal(original.Current.Speakers, migrated.Current.Speakers);
+        Assert.Equal(43, migrated.Current.Groups.Single().MasterVolume);
+        Assert.True(migrated.Current.Groups.Single().Muted);
+        Assert.Equal(original.Current.Groups.Single().SpeakerIds, migrated.Current.Groups.Single().SpeakerIds);
+        Assert.Equal(original.Current.Groups.Single().SourceLevels, migrated.Current.Groups.Single().SourceLevels);
+        string backup = Assert.Single(Directory.GetFiles(Path.GetDirectoryName(directory.StatePath)!, "*.v2.*.backup"));
+        Assert.Equal(saved, File.ReadAllText(backup));
+        string configuration = File.ReadAllText(directory.StatePath);
+        Assert.Contains("enabledSources", configuration);
+        Assert.DoesNotContain("volumeMode", configuration);
+        Assert.Equal(migrated.Current.Groups.Single().SourcePriority, Load().Current.Groups.Single().SourcePriority);
+        Assert.Throws<InvalidDataException>(() => CreateStore(directory.StatePath));
+    }
+
+    [Fact]
     public void ReloadsSourceBalanceWithoutChangingMaster()
     {
         using var directory = new TemporaryDirectory();

@@ -64,6 +64,22 @@ public sealed class MqttServiceTests
     }
 
     [Fact]
+    public async Task OnlineStatusAnnouncesProfilePlaybackOnlyForVersionThreeState()
+    {
+        Stack legacy = CreateStack(new MqttOptions { AutoReconnect = false });
+        await legacy.HostedService.StartAsync(CancellationToken.None);
+        var legacyStatus = Assert.IsType<ServerStatusMessage>(legacy.MqttClient.Published.Last(publish => publish.Topic == StatusTopic).Message);
+        Assert.Null(legacyStatus.ProtocolVersion);
+        Assert.DoesNotContain("protocolVersion", System.Text.Json.JsonSerializer.Serialize(legacyStatus));
+
+        Stack profiles = CreateStack(new MqttOptions { AutoReconnect = false });
+        profiles.StateStore.Save(profiles.StateStore.Current with { Version = 3 });
+        await profiles.HostedService.StartAsync(CancellationToken.None);
+        var profileStatus = Assert.IsType<ServerStatusMessage>(profiles.MqttClient.Published.Last(publish => publish.Topic == StatusTopic).Message);
+        Assert.Equal(3, profileStatus.ProtocolVersion);
+    }
+
+    [Fact]
     public async Task HostedServiceConnectsWhenSnapserverIsUnavailable()
     {
         Stack stack = CreateStack(new MqttOptions { AutoReconnect = false });

@@ -23,16 +23,28 @@ public static class MqttServiceExtensions
         services.AddSingleton<ISyrenMqttClientFactory, SyrenMqttClientFactory>();
         services.AddSingleton<IMqttClientService, MqttClientService>();
 
-        // Register handlers
-        services.AddSingleton<IMqttMessageHandler, UpdateDistanceHandler>();
-        services.AddSingleton<IMqttMessageHandler, SetSpeakerVolumeHandler>();
-        services.AddSingleton<IMqttMessageHandler, ConnectSpeakerHandler>();
-        services.AddSingleton<IMqttMessageHandler, DisconnectSpeakerHandler>();
-        services.AddSingleton<IMqttMessageHandler, ConfigureSpeakerHandler>();
-        services.AddSingleton<IMqttMessageHandler, DeleteSpeakerHandler>();
-        services.AddSingleton<IMqttMessageHandler, UpsertGroupHandler>();
-        services.AddSingleton<IMqttMessageHandler, DeleteGroupHandler>();
-        services.AddSingleton<IMqttMessageHandler, SetSpeakerLevelHandler>();
+        // Profile mode listens only to version 3 topics, and legacy mode only to the old ones.
+        if (DistanceServiceExtensions.ProfileSessions(configuration))
+        {
+            foreach (string topic in new[] { "Command", "Lifecycle", "Position", "ReceiverStatus", "SpotifyLinked" })
+            {
+                services.AddSingleton<IMqttMessageHandler>(provider => new ProfilePlaybackHandler(
+                    provider.GetRequiredService<ProfilePlaybackCoordinator>(), topic,
+                    provider.GetRequiredService<ILogger<ProfilePlaybackHandler>>()));
+            }
+        }
+        else
+        {
+            services.AddSingleton<IMqttMessageHandler, UpdateDistanceHandler>();
+            services.AddSingleton<IMqttMessageHandler, SetSpeakerVolumeHandler>();
+            services.AddSingleton<IMqttMessageHandler, ConnectSpeakerHandler>();
+            services.AddSingleton<IMqttMessageHandler, DisconnectSpeakerHandler>();
+            services.AddSingleton<IMqttMessageHandler, ConfigureSpeakerHandler>();
+            services.AddSingleton<IMqttMessageHandler, DeleteSpeakerHandler>();
+            services.AddSingleton<IMqttMessageHandler, UpsertGroupHandler>();
+            services.AddSingleton<IMqttMessageHandler, DeleteGroupHandler>();
+            services.AddSingleton<IMqttMessageHandler, SetSpeakerLevelHandler>();
+        }
 
         // Register the publisher before the MQTT lifecycle service so it is started first
         services.AddSingleton<ConfigurationPublisher>();

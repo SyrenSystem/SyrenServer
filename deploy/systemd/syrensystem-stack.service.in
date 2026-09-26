@@ -4,10 +4,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=oneshot
+RemainAfterExit=yes
 WorkingDirectory=__SERVER_DIRECTORY__
-ExecStart=/usr/bin/podman-compose -f __COMPOSE_FILE__ up --no-build
-ExecStop=/usr/bin/podman-compose -f __COMPOSE_FILE__ down
+# Stop keeps the containers for the rollback helper; start recreates them from the current images.
+ExecStart=/usr/bin/podman-compose -f __COMPOSE_FILE__ __PROFILE_COMPOSE__ up -d --no-build --force-recreate
+ExecStop=/usr/bin/podman-compose -f __COMPOSE_FILE__ __PROFILE_COMPOSE__ stop
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=0

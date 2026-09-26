@@ -103,6 +103,14 @@ public sealed class SnapCastService : ISnapCastService
         cancellationToken
     );
 
+    public Task DeleteClientAsync(
+        string id,
+        CancellationToken cancellationToken = default) => CallWithoutResultAsync(
+        "Server.DeleteClient",
+        new { id = Identifiers.Normalize(id) },
+        cancellationToken
+    );
+
     private async Task CallWithoutResultAsync(
         string method,
         object? parameters,

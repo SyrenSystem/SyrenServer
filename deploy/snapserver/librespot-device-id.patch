@@ -1,0 +1,93 @@
+diff --git a/src/main.rs b/src/main.rs
+index 5286d09..2255e1c 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -41,8 +41,52 @@ use url::Url;
+ mod player_event_handler;
+ use player_event_handler::{EventHandler, run_program_on_sink_events};
+ 
+-fn device_id(name: &str) -> String {
+-    HEXLOWER.encode(&Sha1::digest(name.as_bytes()))
++fn device_id(name: &str, configured_id: Option<&str>) -> Result<String, &'static str> {
++    match configured_id {
++        Some(identifier) if identifier.len() == 40
++            && identifier.bytes().all(|character| character.is_ascii_hexdigit()) => {
++            Ok(identifier.to_ascii_lowercase())
++        }
++        Some(_) => Err("Device ID must contain exactly 40 hexadecimal characters"),
++        None => Ok(HEXLOWER.encode(&Sha1::digest(name.as_bytes()))),
++    }
++}
++
++#[cfg(test)]
++mod device_identity_tests {
++    use super::device_id;
++
++    #[test]
++    fn legacy_identity_is_preserved_without_an_override() {
++        assert_eq!(device_id("SyrenSystem", None).unwrap(),
++            super::HEXLOWER.encode(&super::Sha1::digest(b"SyrenSystem")));
++    }
++
++    #[test]
++    fn personal_destinations_can_share_a_name() {
++        let first_id = "1111111111111111111111111111111111111111";
++        let second_id = "2222222222222222222222222222222222222222";
++        assert_ne!(device_id("SyrenSystem", Some(first_id)).unwrap(),
++            device_id("SyrenSystem", Some(second_id)).unwrap());
++    }
++
++    #[test]
++    fn renaming_a_destination_preserves_its_identity() {
++        let identifier = "abcdef0123456789abcdef0123456789abcdef01";
++        assert_eq!(device_id("Kitchen", Some(identifier)).unwrap(),
++            device_id("Living room", Some(identifier)).unwrap());
++        assert_eq!(device_id("Kitchen", Some(&identifier.to_uppercase())).unwrap(), identifier);
++    }
++
++    #[test]
++    fn malformed_device_ids_are_rejected() {
++        for identifier in ["", "abc", "gggggggggggggggggggggggggggggggggggggggg",
++            "11111111111111111111111111111111111111111"] {
++            assert!(device_id("SyrenSystem", Some(identifier)).is_err());
++        }
++    }
++
++    use sha1::Digest;
+ }
+ 
+ fn usage(program: &str, opts: &getopts::Options) -> String {
+@@ -241,6 +285,7 @@ async fn get_setup() -> Setup {
+     const CACHE: &str = "cache";
+     const CACHE_SIZE_LIMIT: &str = "cache-size-limit";
+     const DEVICE: &str = "device";
++    const DEVICE_ID: &str = "device-id";
+     const DEVICE_TYPE: &str = "device-type";
+     const DEVICE_IS_GROUP: &str = "group";
+     const DISABLE_AUDIO_CACHE: &str = "disable-audio-cache";
+@@ -451,6 +496,12 @@ async fn get_setup() -> Setup {
+         "Device name. Defaults to Librespot.",
+         "NAME",
+     )
++    .optopt(
++        "",
++        DEVICE_ID,
++        "Stable device identity, independent of its name. Defaults to the name hash.",
++        "40_HEX_CHARACTERS",
++    )
+     .optopt(
+         BITRATE_SHORT,
+         BITRATE,
+@@ -1564,7 +1615,11 @@ async fn get_setup() -> Setup {
+     };
+ 
+     let session_config = SessionConfig {
+-        device_id: device_id(&connect_config.name),
++        device_id: device_id(&connect_config.name, opt_str(DEVICE_ID).as_deref())
++            .unwrap_or_else(|message| {
++                error!("{message}");
++                exit(1);
++            }),
+         proxy: opt_str(PROXY).or_else(|| std::env::var("http_proxy").ok()).map(
+             |s| {
+                 match Url::parse(&s) {

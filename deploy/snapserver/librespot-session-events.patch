@@ -1,0 +1,242 @@
+diff --git a/connect/src/spirc.rs b/connect/src/spirc.rs
+index cea4e6f..3940e50 100644
+--- a/connect/src/spirc.rs
++++ b/connect/src/spirc.rs
+@@ -586,6 +586,8 @@ impl SpircTask {
+         // Set when the reconnect watchdog decides we must restart to recover our
+         // device registration. Handled after the loop like the session-lost path.
+         let mut force_restart = false;
++        let name_file = std::env::var_os("SYREN_NAME_FILE");
++        let mut name_updates = tokio::time::interval(std::time::Duration::from_secs(1));
+ 
+         while !self.session.is_invalid() && !self.shutdown {
+             let commands = self.commands.as_mut();
+@@ -599,6 +601,16 @@ impl SpircTask {
+             let reconnect_grace = self.reconnect_grace_until;
+ 
+             tokio::select! {
++                _ = name_updates.tick(), if name_file.is_some() => {
++                    if let Some(path) = name_file.as_ref() {
++                        if let Ok(name) = std::fs::read_to_string(path) {
++                            if !name.is_empty() && name.len() <= 512 && name != self.connect_state.device_info().name {
++                                self.connect_state.set_name(name);
++                                self.update_state = true;
++                            }
++                        }
++                    }
++                },
+                 // startup of the dealer requires a connection_id, which is retrieved at the very beginning
+                 connection_id_update = self.connection_id_update.next() => unwrap! {
+                     connection_id_update,
+@@ -1315,6 +1327,9 @@ impl SpircTask {
+             let became_inactive = self.connect_state.is_active()
+                 && cluster.active_device_id != self.session.device_id();
+             if became_inactive {
++                self.player.emit_playback_intent(
++                    if cluster.active_device_id.is_empty() { "interrupt" } else { "end" },
++                    self.session.username(), String::new());
+                 info!("device became inactive");
+                 self.handle_disconnect().await?;
+                 self.handle_stop();
+@@ -1370,8 +1385,22 @@ impl SpircTask {
+             self.diag_device_label(&request.sent_by_device_id),
+         );
+ 
++        let intent = match &request.command {
++            Command::Play(_) | Command::Resume(_) => Some("play"),
++            Command::Pause(_) => Some("pause"),
++            Command::Transfer(transfer) => transfer.data.as_ref().map(|state| {
++                if state.playback.is_paused() { "pause" } else { "play" }
++            }),
++            _ => None,
++        };
++        let command_id = format!("{}:{}", request.sent_by_device_id, request.message_id);
+         let response = match self.handle_request(request).await {
+-            Ok(_) => Reply::Success,
++            Ok(_) => {
++                if let Some(action) = intent {
++                    self.player.emit_playback_intent(action, self.session.username(), command_id);
++                }
++                Reply::Success
++            },
+             Err(why) => {
+                 error!("failed to handle request: {why}");
+                 Reply::Failure
+@@ -2099,6 +2128,7 @@ impl SpircTask {
+             self.add_autoplay_resolving_when_required();
+             self.load_track(continue_playing, 0)
+         } else {
++            self.player.emit_playback_intent("end", self.session.username(), String::new());
+             info!("Not playing next track because there are no more tracks left in queue.");
+             self.handle_stop();
+             Ok(())
+@@ -2233,6 +2263,7 @@ impl SpircTask {
+ 
+     fn load_track(&mut self, start_playing: bool, position_ms: u32) -> Result<(), Error> {
+         if self.connect_state.current_track(MessageField::is_none) {
++            self.player.emit_playback_intent("end", self.session.username(), String::new());
+             debug!("current track is none, stopping playback");
+             self.handle_stop();
+             return Ok(());
+diff --git a/connect/src/state.rs b/connect/src/state.rs
+index f810d85..1944600 100644
+--- a/connect/src/state.rs
++++ b/connect/src/state.rs
+@@ -278,6 +278,11 @@ impl ConnectState {
+         player.is_playing && player.is_paused && player.is_buffering
+     }
+ 
++    pub fn set_name(&mut self, name: String) {
++        self.device_mut().device_info.as_mut()
++            .expect("the device_info has to be always given").name = name;
++    }
++
+     pub fn set_volume(&mut self, volume: u32) {
+         self.device_mut()
+             .device_info
+diff --git a/playback/src/player.rs b/playback/src/player.rs
+index f3d803d..6085bc1 100644
+--- a/playback/src/player.rs
++++ b/playback/src/player.rs
+@@ -117,6 +117,11 @@ enum PlayerCommand {
+     SetSinkEventCallback(Option<SinkEventCallback>),
+     EmitVolumeChangedEvent(u16),
+     SetAutoNormaliseAsAlbum(bool),
++    EmitPlaybackIntent {
++        action: &'static str,
++        user_name: String,
++        command_id: String,
++    },
+     EmitSessionDisconnectedEvent {
+         connection_id: String,
+         user_name: String,
+@@ -234,6 +239,11 @@ pub enum PlayerEvent {
+     TrackChanged {
+         audio_item: Box<AudioItem>,
+     },
++    PlaybackIntent {
++        action: &'static str,
++        user_name: String,
++        command_id: String,
++    },
+     SessionConnected {
+         connection_id: String,
+         user_name: String,
+@@ -627,6 +637,10 @@ impl Player {
+         self.command(PlayerCommand::EmitFilterExplicitContentChangedEvent(filter));
+     }
+ 
++    pub fn emit_playback_intent(&self, action: &'static str, user_name: String, command_id: String) {
++        self.command(PlayerCommand::EmitPlaybackIntent { action, user_name, command_id });
++    }
++
+     pub fn emit_session_connected_event(&self, connection_id: String, user_name: String) {
+         self.command(PlayerCommand::EmitSessionConnectedEvent {
+             connection_id,
+@@ -2350,6 +2364,9 @@ impl PlayerInternal {
+                 client_model_name,
+             }),
+ 
++            PlayerCommand::EmitPlaybackIntent { action, user_name, command_id } =>
++                self.send_event(PlayerEvent::PlaybackIntent { action, user_name, command_id }),
++
+             PlayerCommand::EmitSessionConnectedEvent {
+                 connection_id,
+                 user_name,
+@@ -2542,6 +2559,10 @@ impl fmt::Debug for PlayerCommand {
+                 .debug_tuple("EmitFilterExplicitContentChangedEvent")
+                 .field(&filter)
+                 .finish(),
++            PlayerCommand::EmitPlaybackIntent { action, .. } => f
++                .debug_tuple("EmitPlaybackIntent")
++                .field(action)
++                .finish(),
+             PlayerCommand::EmitSessionConnectedEvent {
+                 connection_id,
+                 user_name,
+diff --git a/src/main.rs b/src/main.rs
+index 2255e1c..97675df 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -260,6 +260,7 @@ struct Setup {
+     credentials: Option<Credentials>,
+     enable_oauth: bool,
+     enable_device_auth: bool,
++    lock_discovery_account: bool,
+     oauth_port: Option<u16>,
+     zeroconf_port: u16,
+     player_event_program: Option<String>,
+@@ -291,6 +292,7 @@ async fn get_setup() -> Setup {
+     const DISABLE_AUDIO_CACHE: &str = "disable-audio-cache";
+     const DISABLE_CREDENTIAL_CACHE: &str = "disable-credential-cache";
+     const DISABLE_DISCOVERY: &str = "disable-discovery";
++    const LOCK_DISCOVERY_ACCOUNT: &str = "lock-discovery-account";
+     const DISABLE_GAPLESS: &str = "disable-gapless";
+     const DITHER: &str = "dither";
+     const EMIT_SINK_EVENTS: &str = "emit-sink-events";
+@@ -490,6 +492,11 @@ async fn get_setup() -> Setup {
+         ENABLE_DEVICE_AUTH,
+         "Perform OAuth sign in by pairing a code at spotify.com/pair. Needs no browser on this machine.",
+     )
++    .optflag(
++        "",
++        LOCK_DISCOVERY_ACCOUNT,
++        "Close local discovery after the first account connects.",
++    )
+     .optopt(
+         NAME_SHORT,
+         NAME,
+@@ -1263,6 +1270,7 @@ async fn get_setup() -> Setup {
+         cache
+     };
+ 
++    let lock_discovery_account = opt_present(LOCK_DISCOVERY_ACCOUNT);
+     let credentials = {
+         let cached_creds = cache.as_ref().and_then(Cache::credentials);
+ 
+@@ -1305,6 +1313,8 @@ async fn get_setup() -> Setup {
+         feature = "with-avahi"
+     )) {
+         Some("librespot compiled without zeroconf backend".to_owned())
++    } else if lock_discovery_account && credentials.is_some() {
++        Some("this receiver already belongs to an account".to_owned())
+     } else if opt_present(DISABLE_DISCOVERY) {
+         Some(format!(
+             "the `--{DISABLE_DISCOVERY}` / `-{DISABLE_DISCOVERY_SHORT}` flag set",
+@@ -1936,6 +1946,7 @@ async fn get_setup() -> Setup {
+         credentials,
+         enable_oauth,
+         enable_device_auth,
++        lock_discovery_account,
+         oauth_port,
+         zeroconf_port,
+         player_event_program,
+@@ -2127,6 +2138,11 @@ async fn main() {
+             }, if discovery.is_some() => {
+                 match credentials {
+                     Some(credentials) => {
++                        if setup.lock_discovery_account {
++                            if let Some(discovery) = discovery.take() {
++                                tokio::spawn(discovery.shutdown());
++                            }
++                        }
+                         last_credentials = Some(credentials.clone());
+                         auto_connect_times.clear();
+ 
+diff --git a/src/player_event_handler.rs b/src/player_event_handler.rs
+index 9ca2ddd..78771a0 100644
+--- a/src/player_event_handler.rs
++++ b/src/player_event_handler.rs
+@@ -180,6 +180,12 @@ impl EventHandler {
+                                 env_vars.insert("TRACK_ID", track_id.to_id());
+                                 env_vars.insert("POSITION_MS", position_ms.to_string());
+                             }
++                            PlayerEvent::PlaybackIntent { action, user_name, command_id } => {
++                                env_vars.insert("PLAYER_EVENT", "syren_intent".to_string());
++                                env_vars.insert("ACTION", action.to_string());
++                                env_vars.insert("USER_NAME", user_name);
++                                env_vars.insert("COMMAND_ID", command_id);
++                            }
+                             PlayerEvent::SessionConnected {
+                                 connection_id,
+                                 user_name,

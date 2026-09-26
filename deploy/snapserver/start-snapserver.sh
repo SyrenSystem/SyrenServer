@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+if [ "${SYREN_PROFILE_SESSIONS:-0}" = "1" ]; then
+  exec /usr/bin/python3 /usr/local/bin/start-profile-audio.py
+fi
+
 default_route="$(ip -4 route get 1.1.1.1)"
 interface_ip_address="$(printf '%s\n' "$default_route" | sed -n 's/.* src \([^ ]*\).*/\1/p')"
 

@@ -56,6 +56,8 @@ internal sealed class RecordingSnapCastService : ISnapCastService
     public List<(string GroupId, bool Muted)> GroupMuteChanges { get; } = [];
     public List<string> AddedStreams { get; } = [];
     public List<string> RemovedStreams { get; } = [];
+    public List<string> DeletedClients { get; } = [];
+    public TaskCompletionSource? StatusBlocker { get; set; }
 
     public async Task SetClientVolumeAsync(
         string id,
@@ -76,14 +78,18 @@ internal sealed class RecordingSnapCastService : ISnapCastService
         }
     }
 
-    public Task<SnapServerStatus> GetStatusAsync(CancellationToken cancellationToken = default)
+    public async Task<SnapServerStatus> GetStatusAsync(CancellationToken cancellationToken = default)
     {
         StatusCalls++;
+        if (StatusBlocker != null)
+        {
+            await StatusBlocker.Task.WaitAsync(cancellationToken);
+        }
         if (StatusException != null)
         {
-            return Task.FromException<SnapServerStatus>(StatusException);
+            throw StatusException;
         }
-        return Task.FromResult(Status);
+        return Status;
     }
 
     public Task SetGroupClientsAsync(
@@ -144,6 +150,14 @@ internal sealed class RecordingSnapCastService : ISnapCastService
         CancellationToken cancellationToken = default)
     {
         RemovedStreams.Add(streamId);
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteClientAsync(
+        string id,
+        CancellationToken cancellationToken = default)
+    {
+        DeletedClients.Add(id);
         return Task.CompletedTask;
     }
 

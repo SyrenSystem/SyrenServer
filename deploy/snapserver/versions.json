@@ -12,5 +12,7 @@
   "rust": "1.98.1",
   "snapserver_revision": "f12373479243e93a97237592d6a3703539ec41d5",
   "snapserver_lifecycle_patch_sha256": "dd3189879fc11d88b598120ae282d69420275332ce59fbe0d46dd9a74cba462b",
-  "mosquitto": "2.1.2-alpine"
+  "mosquitto": "2.1.2-alpine",
+  "librespot_device_id_patch_sha256": "a7df3a9a3f34b0cfa985877d75fa8d101a362214a066d96613b4fb30b8ca9a9a",
+  "librespot_session_events_patch_sha256": "f51d7bb4d1b181d28eaef47976eebd75807f38af28f881a78fed3c643ccd8e39"
 }

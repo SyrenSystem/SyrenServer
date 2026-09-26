@@ -18,6 +18,7 @@ public sealed class MqttClientService : IMqttClientService, IAsyncDisposable
     private readonly ServerSession _session;
     private readonly ILogger<MqttClientService> _logger;
     private bool _isConnected;
+    private long _connectionEpoch;
 
     public MqttClientService(
         IOptions<MqttOptions> options,
@@ -39,6 +40,7 @@ public sealed class MqttClientService : IMqttClientService, IAsyncDisposable
     }
 
     public bool IsConnected => _isConnected && _mqttClient.IsConnected;
+    public long ConnectionEpoch => Interlocked.Read(ref _connectionEpoch);
 
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
@@ -75,6 +77,7 @@ public sealed class MqttClientService : IMqttClientService, IAsyncDisposable
 
             await SubscribeToTopicsAsync(cancellationToken);
             _isConnected = true;
+            Interlocked.Increment(ref _connectionEpoch);
             _logger.LogInformation("Connected and subscribed to MQTT at {Host}:{Port}", _options.Host, _options.Port);
         }
         catch (Exception exception)

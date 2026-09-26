@@ -1,5 +1,8 @@
 # SyrenServer
 
+Profile sessions use protocol 3 across the server, SyrenApp and both receivers. See [the profile session guide](../SyrenDocs/ProfileSessions.md) and [delivery evidence](../SyrenDocs/ProfileSessionsDelivery.md) before upgrading. After coordinated migration, always start with `podman compose -f compose.yaml -f compose.profiles.yaml up -d --build`. The base Compose file and legacy source instructions below remain the version 2 rollback configuration.
+
+
 SyrenServer converts BLE distance measurements received through MQTT into per speaker Snapcast volume changes. It owns speaker setup, playback groups, ordered source priority, calibrated positions, and persistent volume settings.
 
 ## Container stack
