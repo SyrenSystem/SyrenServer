@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import resource
 import uuid
 
 
@@ -31,6 +32,18 @@ def atomic_json(path, value):
 def read_json(path, default):
     return json.loads(path.read_text()) if path.exists() else default
 
+
+# Real time priorities for the audio container, below the 88 PipeWire uses on the host.
+SNAPSERVER_PRIORITY = 85
+LIBRESPOT_PRIORITY = 84
+
+
+def realtime_command(command, wanted):
+    # Runs the command at real time priority when the container limit allows it, and normally otherwise.
+    limit = resource.getrlimit(resource.RLIMIT_RTPRIO)[0]
+    if os.geteuid() != 0 and limit != resource.RLIM_INFINITY:
+        wanted = min(wanted, limit)
+    return ['chrt', '--fifo', str(wanted), *command] if wanted > 0 else command
 
 @dataclass(frozen=True)
 class ReceiverSpec:

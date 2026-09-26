@@ -1,11 +1,21 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from spotify_sessions import LifecycleJournal, ReceiverSpec, personal_receivers
+from spotify_sessions import LifecycleJournal, ReceiverSpec, personal_receivers, realtime_command
 
 
 class SpotifySessionsTests(unittest.TestCase):
+    def test_audio_processes_use_the_real_time_limit(self):
+        with patch('spotify_sessions.os.geteuid', return_value=1000):
+            with patch('spotify_sessions.resource.getrlimit', return_value=(95, 95)):
+                self.assertEqual(['chrt', '--fifo', '85', 'snapserver'], realtime_command(['snapserver'], 85))
+            with patch('spotify_sessions.resource.getrlimit', return_value=(50, 50)):
+                self.assertEqual(['chrt', '--fifo', '50', 'snapserver'], realtime_command(['snapserver'], 85))
+            with patch('spotify_sessions.resource.getrlimit', return_value=(0, 0)):
+                self.assertEqual(['snapserver'], realtime_command(['snapserver'], 85))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

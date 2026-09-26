@@ -7,6 +7,7 @@ import signal
 import subprocess
 import time
 
+from spotify_sessions import SNAPSERVER_PRIORITY, realtime_command
 from spotify_supervisor import stop
 
 
@@ -14,8 +15,8 @@ def main():
     configuration = Path('/etc/snapserver.conf').read_text()
     configuration = '\n'.join(line for line in configuration.splitlines() if not line.startswith('source ='))
     Path('/tmp/snapserver-profiles.conf').write_text(configuration + '\n')
-    server = subprocess.Popen(['/usr/bin/snapserver', '--config', '/tmp/snapserver-profiles.conf',
-                               '--server.datadir=/var/lib/snapserver'])
+    server = subprocess.Popen(realtime_command(['/usr/bin/snapserver', '--config', '/tmp/snapserver-profiles.conf',
+                                                '--server.datadir=/var/lib/snapserver'], SNAPSERVER_PRIORITY))
     supervisor = subprocess.Popen(['/usr/bin/python3', '/usr/local/bin/spotify_supervisor.py'])
     stopping = False
 

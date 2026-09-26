@@ -16,7 +16,8 @@ import time
 import urllib.parse
 import uuid
 
-from spotify_sessions import LifecycleJournal, ReceiverSpec, atomic_json, destinations, personal_receivers, read_json, receiver_identity
+from spotify_sessions import (LIBRESPOT_PRIORITY, LifecycleJournal, ReceiverSpec, atomic_json, destinations, personal_receivers,
+                              read_json, realtime_command, receiver_identity)
 
 PREFIX = 'SyrenSystem/v3/'
 REPUBLISH_SECONDS = 2
@@ -229,7 +230,8 @@ class SpotifySupervisor:
                            SYREN_RECEIVER_ID=specification.identity, SYREN_RECEIVER_INSTANCE=instance,
                            SYREN_NAME_FILE=str(name_file))
         command = self.command(specification, cache) + ['--device', str(fifo), '--onevent', '/usr/local/bin/spotify_event.py']
-        process = subprocess.Popen(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(realtime_command(command, LIBRESPOT_PRIORITY), env=environment,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.processes[specification.identity] = {'specification': specification, 'process': process, 'instance': instance,
                                                    'playing': False, 'reconciledGeneration': 0}
 
