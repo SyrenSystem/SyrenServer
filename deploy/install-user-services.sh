@@ -82,6 +82,10 @@ if [ "$(systemctl show "user@$(id -u).service" -p LimitRTPRIO --value)" -lt 95 ]
 fi
 if [ -n "$profile_compose" ]; then
   sleep 5
-  audio_priority="$(podman top syrenserver_snapserver_1 args 2>/dev/null | grep -c 'chrt --fifo' || true)"
-  printf 'Audio processes started at real time priority: %s\n' "$audio_priority"
+  for process in snapserver librespot; do
+    process_id="$(pgrep -x "$process" | head -n 1 || true)"
+    if [ -n "$process_id" ]; then
+      printf '%s scheduling: %s\n' "$process" "$(ps -o cls=,rtprio= -p "$process_id")"
+    fi
+  done
 fi
