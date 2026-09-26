@@ -11,6 +11,8 @@ WorkingDirectory=__SERVER_DIRECTORY__
 ExecStart=/usr/bin/podman-compose -f __COMPOSE_FILE__ __PROFILE_COMPOSE__ up -d --no-build --force-recreate
 ExecStop=/usr/bin/podman-compose -f __COMPOSE_FILE__ __PROFILE_COMPOSE__ stop
 Restart=on-failure
+# Lets Snapserver and librespot in the audio container run at real time priority.
+LimitRTPRIO=95
 RestartSec=3
 TimeoutStartSec=0
 TimeoutStopSec=45

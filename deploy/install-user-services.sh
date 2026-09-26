@@ -73,3 +73,15 @@ else
 fi
 
 systemctl --user --no-pager status syrensystem-stack.service || true
+
+# Real time priority is always the last step, so audio never runs without it.
+if [ "$(systemctl show "user@$(id -u).service" -p LimitRTPRIO --value)" -lt 95 ]; then
+  printf '%s\n' 'Allowing real time audio priority for this user; sudo asks for your password.'
+  sudo sh "$server_directory/deploy/enable-realtime.sh" "$(id -un)"
+  printf '%s\n' 'Log out and in again, or reboot, so the server stack starts with real time priority.' >&2
+fi
+if [ -n "$profile_compose" ]; then
+  sleep 5
+  audio_priority="$(podman top syrenserver_snapserver_1 args 2>/dev/null | grep -c 'chrt --fifo' || true)"
+  printf 'Audio processes started at real time priority: %s\n' "$audio_priority"
+fi
