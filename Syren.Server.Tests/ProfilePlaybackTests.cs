@@ -484,6 +484,76 @@ public sealed class ProfilePlaybackTests
 
     private bool Accepted(SessionLifecycleEvent message) => _catalogue.Apply(message) == LifecycleOutcome.Accepted;
 
+    [Fact]
+    public async Task DesktopOutputsKeepWarmCopiesAndPreserveTheClaim()
+    {
+        PrepareSpeaker();
+        _store.Save(_store.Current with { PlaybackActivated = true, Sessions = [] });
+        _catalogue.BeginGeneration();
+        var snapcast = new RecordingSnapCastService();
+        var service = new PcSessionService(_store, _catalogue, snapcast, NullLogger<PcSessionService>.Instance);
+        for (int index = 0; index < 2; index++)
+        {
+            await service.StartAsync("request", "first", "app" + index, "house", "speaker", "192.168.1.2", "192.168.1.3",
+                _store.Current.Revision, _store.Current.Generation, CancellationToken.None, desktopOutputs: true);
+        }
+        Assert.Equal(2, _store.Current.ClaimSequence);
+        Assert.Equal(2, snapcast.AddedStreams.Count);
+        Assert.Equal([4954, 4955], _store.Current.Sessions.SelectMany(session => session.Transports)
+            .Where(transport => transport.TcpPort != null).Select(transport => transport.TcpPort!.Value).ToArray());
+        foreach (PlaybackSession session in _store.Current.Sessions)
+        {
+            Assert.Equal(2, session.Transports.Count);
+            Assert.Equal("auto", session.PcMode);
+            Assert.Equal(["snapcast", "rtp"], session.Transports.Select(transport => transport.Kind).ToArray());
+            SessionTransport[] original = session.Transports.ToArray();
+            for (int index = 0; index < 20; index++)
+            {
+                string mode = new[] { "stable", "fast", "auto" }[index % 3];
+                Assert.Equal(LifecycleOutcome.Accepted, _catalogue.Apply(new SessionLifecycleEvent
+                {
+                    Generation = _store.Current.Generation, SessionId = session.Id, ProducerId = session.ProducerId,
+                    EventSequence = index + 2, Action = "transport", PcMode = mode,
+                }));
+                PlaybackSession updated = _store.Current.Sessions.Single(candidate => candidate.Id == session.Id);
+                Assert.Equal(mode, updated.PcMode);
+                Assert.Equal(session.ClaimSequence, updated.ClaimSequence);
+                Assert.Equal(original, updated.Transports);
+            }
+        }
+        Assert.Equal(2, _store.Current.Sessions.SelectMany(session => session.Transports)
+            .Where(transport => transport.Kind == "rtp").Select(transport => transport.Endpoint).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task DesktopOutputsRejectReceiversWithoutTheCapability()
+    {
+        PrepareSpeaker();
+        _store.Save(_store.Current with { PlaybackActivated = true, Sessions = [] });
+        _catalogue.BeginGeneration();
+        var snapcast = new RecordingSnapCastService();
+        ProfilePlaybackCoordinator coordinator = Coordinator(snapcast);
+        var client = new FakeMqttClientService();
+        var handler = new ProfilePlaybackHandler(coordinator, "Command");
+        await handler.HandleMessageAsync(Message(handler.Topic, Command("pc", "pc", new
+        {
+            profileId = "first", instanceId = "app", destination = "house", desktopOutputs = true,
+        })), client);
+        await handler.CommandsCompleted;
+        Assert.False(Published(client, "Result/pc").GetProperty("success").GetBoolean());
+        Assert.Empty(snapcast.AddedStreams);
+        Assert.Empty(_store.Current.Sessions);
+    }
+
+    [Theory]
+    [InlineData("fast")]
+    [InlineData("unknown")]
+    public void InvalidDesktopModesAreRejected(string mode)
+    {
+        _catalogue.BeginGeneration();
+        Assert.False(_catalogue.StartPc(PcStart() with { PcMode = mode }, _store.Current.Revision));
+    }
+
     private ProfilePlaybackCoordinator Coordinator(RecordingSnapCastService? snapcast = null)
     {
         snapcast ??= new RecordingSnapCastService();

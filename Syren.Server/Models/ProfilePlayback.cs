@@ -50,6 +50,9 @@ public sealed record SessionTransport
     public string? SpeakerId { get; init; }
     [JsonPropertyName("available")]
     public bool Available { get; init; }
+    [JsonPropertyName("latencyMsec")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? LatencyMsec { get; init; }
 }
 
 public sealed record PlaybackSession
@@ -76,6 +79,9 @@ public sealed record PlaybackSession
     public long EventSequence { get; init; }
     [JsonPropertyName("transports")]
     public List<SessionTransport> Transports { get; init; } = [];
+    [JsonPropertyName("pcMode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PcMode { get; init; }
     [JsonPropertyName("interruptedAt")]
     public DateTimeOffset? InterruptedAt { get; init; }
     // The server decides this so receivers never compare clocks.
@@ -130,6 +136,9 @@ public sealed record SessionLifecycleEvent
     public string? Destination { get; init; }
     [JsonPropertyName("transports")]
     public List<SessionTransport>? Transports { get; init; }
+    [JsonPropertyName("pcMode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PcMode { get; init; }
 }
 
 public sealed class ProfileConfigurationCommand : ConfigurationCommand

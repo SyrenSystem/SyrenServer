@@ -110,7 +110,8 @@ public sealed class PcSessionService(ISystemStateStore store, SessionCatalogueSe
         $"tcp://0.0.0.0:{port}?name={identity}&mode=server&sampleformat=48000:16:2&chunk_ms=10&idle_threshold=100&codec=pcm";
 
     public async Task<object> StartAsync(string requestId, string owner, string instance, string destination,
-        string? speakerId, string? senderAddress, string? receiverAddress, long expectedRevision, long generation, CancellationToken cancellationToken)
+        string? speakerId, string? senderAddress, string? receiverAddress, long expectedRevision, long generation,
+        CancellationToken cancellationToken, bool desktopOutputs = false)
     {
         await _gate.WaitAsync(cancellationToken);
         try
@@ -144,24 +145,45 @@ public sealed class PcSessionService(ISystemStateStore store, SessionCatalogueSe
             {
                 await snapcast.RemoveStreamAsync(unused.Id, cancellationToken);
             }
-            await snapcast.AddStreamAsync(StreamUri(stream, port), cancellationToken);
-            List<SessionTransport> transports = [new() { Id = stream, Kind = "snapcast", Endpoint = stream, TcpPort = port, Available = true }];
+            List<SessionTransport> transports = [new() { Id = stream, Kind = "snapcast", Endpoint = stream,
+                TcpPort = port, Available = true }];
             if (speakerId != null)
             {
                 transports.Add(new() { Id = "rtp-" + identity, Kind = "rtp", SpeakerId = speakerId,
-                    Endpoint = $"rtp://{senderAddress}@{receiverAddress}:{46000 + port - 4954}", Available = true });
+                    Endpoint = $"rtp://{senderAddress}@{receiverAddress}:{46000 + port - 4954}", Available = true,
+                    LatencyMsec = desktopOutputs ? 5 : null });
+            }
+            var createdStreams = new List<string>();
+            try
+            {
+                foreach (SessionTransport transport in transports.Where(transport => transport.Kind == "snapcast"))
+                {
+                    await snapcast.AddStreamAsync(StreamUri(transport.Endpoint, transport.TcpPort!.Value), cancellationToken);
+                    createdStreams.Add(transport.Endpoint);
+                }
+            }
+            catch
+            {
+                foreach (string createdStream in createdStreams)
+                {
+                    await snapcast.RemoveStreamAsync(createdStream, CancellationToken.None);
+                }
+                throw;
             }
             bool accepted = catalogue.StartPc(new SessionLifecycleEvent
             {
                 Generation = current.Generation, SessionId = identity, ProducerId = instance, OwnerId = owner,
-                Source = "laptop", Destination = destination, EventSequence = 1, Action = "start", Transports = transports,
+                Source = "laptop", Destination = destination, EventSequence = 1, Action = "start", Transports = transports, PcMode = desktopOutputs ? "auto" : null,
             }, expectedRevision);
             if (!accepted)
             {
-                await snapcast.RemoveStreamAsync(stream, cancellationToken);
+                foreach (string createdStream in createdStreams)
+                {
+                    await snapcast.RemoveStreamAsync(createdStream, cancellationToken);
+                }
                 throw new InvalidOperationException("PC session changed while enabling audio");
             }
-            return new { requestId, success = true, revision = current.Revision, sessionId = identity, transports };
+            return new { requestId, success = true, revision = current.Revision, sessionId = identity, transports, desktopOutputs };
         }
         finally
         {

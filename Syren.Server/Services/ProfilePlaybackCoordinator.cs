@@ -172,8 +172,24 @@ public sealed class ProfilePlaybackCoordinator(
         if (action == "pc")
         {
             string? Optional(string property) => payload.TryGetProperty(property, out var value) ? value.GetString() : null;
+            bool desktopOutputs = payload.TryGetProperty("desktopOutputs", out var desktopChoice) && desktopChoice.GetBoolean();
+            if (desktopOutputs)
+            {
+                lock (_sync)
+                {
+                    bool ready = current.Speakers.All(speaker => _receivers.TryGetValue(speaker.SpeakerId!, out var receiver) &&
+                        clock.GetElapsedTime(receiver.Updated) < ReceiverTimeout && receiver.Status.GetProperty("ready").GetBoolean() &&
+                        receiver.Status.GetProperty("capabilities").EnumerateArray().Any(value => value.GetString() == "pc-outputs"));
+                    if (!ready)
+                    {
+                        return new CommandResultMessage { RequestId = requestId, Success = false, Revision = current.Revision,
+                            Error = "Update every speaker receiver before using the automatic, stable and fast PC outputs" };
+                    }
+                }
+            }
             return await pcSessions.StartAsync(requestId, Text(payload, "profileId"), Text(payload, "instanceId"),
-                Text(payload, "destination"), Optional("speakerId"), Optional("senderAddress"), Optional("receiverAddress"), current.Revision, current.Generation, cancellationToken);
+                Text(payload, "destination"), Optional("speakerId"), Optional("senderAddress"), Optional("receiverAddress"),
+                current.Revision, current.Generation, cancellationToken, desktopOutputs);
         }
         if (action == "linkSpotify")
         {

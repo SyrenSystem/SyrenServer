@@ -116,6 +116,12 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                     Destination = message.Destination!,
                 };
             }
+            if (message.PcMode != null && (session.Source != "laptop" ||
+                message.PcMode is not ("auto" or "stable" or "fast") ||
+                (message.PcMode == "fast" && !(message.Transports ?? session.Transports).Any(transport => transport.Kind == "rtp"))))
+            {
+                return current;
+            }
             if (message.Transports != null && !ValidTransports(message.Transports, session.Source))
             {
                 return current;
@@ -124,6 +130,10 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
             if (session.Source != "spotify" && message.Action is "play" or "pause")
             {
                 return current;
+            }
+            if (message.PcMode != null)
+            {
+                updated = updated with { PcMode = message.PcMode };
             }
             bool claim = false;
             switch (message.Action)
@@ -294,6 +304,7 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
         transports.Select(transport => transport.Id).Distinct().Count() == transports.Count &&
         transports.All(transport => !string.IsNullOrWhiteSpace(transport.Id) &&
             !string.IsNullOrWhiteSpace(transport.Endpoint) &&
+            (transport.LatencyMsec == null || (transport.Kind == "rtp" && transport.LatencyMsec is >= 1 and <= 200)) &&
             (transport.Kind == "snapcast" || (transport.Kind == "rtp" && source == "laptop" &&
                 !string.IsNullOrWhiteSpace(transport.SpeakerId))));
 }
