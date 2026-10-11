@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Syren.Server.Configuration;
@@ -153,8 +154,11 @@ public sealed class SystemStateStoreTests
         Assert.Equal("sensor-one", speaker.SensorId);
     }
 
-    [Fact]
-    public void VersionOneMigrationGroupsAllSpeakersWithConfiguredSources()
+    // AirPlay is configured as a source, but a migrated default group never turns it on by itself.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void VersionOneMigrationGroupsAllSpeakersWithConfiguredSources(bool casting)
     {
         using var directory = new TemporaryDirectory();
         string stateId = Guid.NewGuid().ToString();
@@ -173,7 +177,7 @@ public sealed class SystemStateStoreTests
             SpeakersInfo = [Speaker("AA", "client-a"), Speaker("BB", "client-b"), Speaker("CC", "client-c")],
         };
 
-        var store = CreateStore(directory.StatePath, speakerOptions);
+        var store = CreateStore(directory.StatePath, speakerOptions, casting);
 
         Assert.Equal(2, store.Current.Version);
         Assert.Equal(stateId, store.Current.StateId);
@@ -248,10 +252,130 @@ public sealed class SystemStateStoreTests
         Assert.Equal(4, store.Current.Revision);
     }
 
-    private static SystemStateStore CreateStore(string path, SpeakersOptions? speakerOptions = null) => new(
+    [Fact]
+    public void StateWithoutCastingFieldsLoadsAndRoundTrips()
+    {
+        using var directory = new TemporaryDirectory();
+        File.WriteAllText(directory.StatePath, $$"""
+            {
+              "version": 3,
+              "stateId": "{{Guid.NewGuid()}}",
+              "revision": 7,
+              "speakers": [],
+              "groups": [
+                {
+                  "id": "kantoor", "name": "Kantoor", "speakerIds": [], "enabledSources": ["casting", "spotify"],
+                  "masterVolume": 80, "muted": false, "sourceLevels": { "casting": 70, "spotify": 90 }
+                }
+              ],
+              "profiles": [
+                { "id": "first", "name": "First", "followMe": false, "sourcePriority": ["spotify", "laptop", "casting"], "overlap": [], "spotifyAccountId": "account" }
+              ],
+              "sourcePolicies": { "spotify": "playing", "laptop": "connected", "casting": "connected" },
+              "sessions": [
+                {
+                  "id": "session", "producerId": "receiver", "ownerId": "first", "accountId": "account", "source": "spotify",
+                  "destination": "kantoor", "state": "playing", "claimSequence": 1, "claimed": true, "eventSequence": 2,
+                  "transports": [{ "id": "transport", "kind": "snapcast", "endpoint": "stream", "available": true }]
+                }
+              ],
+              "claimSequence": 1,
+              "catalogueRevision": 3,
+              "generation": 4,
+              "playbackActivated": true
+            }
+            """);
+        var options = Options.Create(new PlaybackOptions
+        {
+            Sources = TestServices.CreatePlaybackOptions(casting: true).Value.Sources, ProfileSessions = true,
+        });
+        SystemStateStore Load() => new(Options.Create(new StateOptions { FilePath = directory.StatePath }),
+            Options.Create(new SpeakersOptions()), options, NullLogger<SystemStateStore>.Instance);
+        var loaded = Load();
+        Assert.Equal(7, loaded.Current.Revision);
+        PersistentPlaybackGroup group = Assert.Single(loaded.Current.Groups);
+        Assert.Equal(["casting", "spotify"], group.SourcePriority);
+        Assert.Equal(70, group.SourceLevels["casting"]);
+        Assert.Empty(Assert.Single(loaded.Current.Profiles).CastingDevices);
+        Assert.Null(loaded.Current.CastingKey);
+        PlaybackSession session = Assert.Single(loaded.Current.Sessions);
+        Assert.Null(session.Protocol);
+        Assert.Null(session.SenderId);
+        loaded.Save(loaded.Current);
+        string written = File.ReadAllText(directory.StatePath);
+        Assert.Contains("\"castingDevices\": []", written);
+        Assert.DoesNotContain("senderId", written);
+        Assert.DoesNotContain("\"protocol\"", written);
+        var reloaded = Load();
+        Assert.Equal(JsonSerializer.Serialize(loaded.Current), JsonSerializer.Serialize(reloaded.Current));
+        Assert.Equal(written, File.ReadAllText(directory.StatePath));
+    }
+
+    [Fact]
+    public void CastingSessionsRewrittenByTheRollbackServerAreDroppedOnLoad()
+    {
+        // The rollback server keeps casting sessions but loses their protocol and senderId on its next write.
+        using var directory = new TemporaryDirectory();
+        File.WriteAllText(directory.StatePath, $$"""
+            {
+              "version": 3,
+              "stateId": "{{Guid.NewGuid()}}",
+              "revision": 7,
+              "speakers": [],
+              "groups": [
+                {
+                  "id": "kantoor", "name": "Kantoor", "speakerIds": [], "enabledSources": ["casting", "spotify"],
+                  "masterVolume": 80, "muted": false, "sourceLevels": { "casting": 70, "spotify": 90 }
+                }
+              ],
+              "profiles": [
+                { "id": "first", "name": "First", "followMe": false, "sourcePriority": ["spotify", "laptop", "casting"], "overlap": [], "spotifyAccountId": "account" }
+              ],
+              "sourcePolicies": { "spotify": "playing", "laptop": "connected", "casting": "connected" },
+              "sessions": [
+                {
+                  "id": "ended", "producerId": "office", "ownerId": "guest:{{new string('a', 64)}}", "accountId": "airplay:device:aa",
+                  "source": "casting", "destination": "kantoor", "state": "ended", "claimSequence": 1, "claimed": false, "eventSequence": 3,
+                  "transports": [{ "id": "airplay-office", "kind": "snapcast", "endpoint": "airplay-office", "available": false }]
+                },
+                {
+                  "id": "open", "producerId": "house", "ownerId": "guest:{{new string('b', 64)}}", "accountId": "airplay:device:bb",
+                  "source": "casting", "destination": "house", "state": "playing", "claimSequence": 2, "claimed": true, "eventSequence": 2,
+                  "transports": [{ "id": "airplay-house", "kind": "snapcast", "endpoint": "airplay-house", "available": true }]
+                },
+                {
+                  "id": "spotify", "producerId": "receiver", "ownerId": "first", "accountId": "account", "source": "spotify",
+                  "destination": "kantoor", "state": "playing", "claimSequence": 3, "claimed": true, "eventSequence": 2,
+                  "transports": [{ "id": "transport", "kind": "snapcast", "endpoint": "stream", "available": true }]
+                }
+              ],
+              "claimSequence": 3,
+              "catalogueRevision": 3,
+              "generation": 4,
+              "playbackActivated": true
+            }
+            """);
+        var options = Options.Create(new PlaybackOptions
+        {
+            Sources = TestServices.CreatePlaybackOptions(casting: true).Value.Sources, ProfileSessions = true,
+        });
+        SystemStateStore Load() => new(Options.Create(new StateOptions { FilePath = directory.StatePath }),
+            Options.Create(new SpeakersOptions()), options, NullLogger<SystemStateStore>.Instance);
+        var loaded = Load();
+        Assert.Equal("spotify", Assert.Single(loaded.Current.Sessions).Id);
+        Assert.Equal(4, loaded.Current.CatalogueRevision);
+        Assert.Equal(3, loaded.Current.ClaimSequence);
+        string written = File.ReadAllText(directory.StatePath);
+        Assert.DoesNotContain("airplay:device", written);
+        var reloaded = Load();
+        Assert.Equal(JsonSerializer.Serialize(loaded.Current), JsonSerializer.Serialize(reloaded.Current));
+        Assert.Equal(written, File.ReadAllText(directory.StatePath));
+    }
+
+    private static SystemStateStore CreateStore(string path, SpeakersOptions? speakerOptions = null, bool casting = false) => new(
         Options.Create(new StateOptions { FilePath = path }),
         Options.Create(speakerOptions ?? new SpeakersOptions()),
-        TestServices.CreatePlaybackOptions(),
+        TestServices.CreatePlaybackOptions(casting: casting),
         NullLogger<SystemStateStore>.Instance
     );
 

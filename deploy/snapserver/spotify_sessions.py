@@ -63,9 +63,9 @@ def receiver_identity(state_id, owner, destination):
     return hashlib.sha1(json.dumps([state_id, owner, destination], separators=(',', ':')).encode()).hexdigest()
 
 
-def destinations(configuration):
+def destinations(configuration, source='spotify'):
     return [('house', 'SyrenSystem')] + [(group['id'], 'SyrenSystem · ' + group['name'])
-        for group in configuration['groups'] if 'spotify' in group['enabledSources']]
+        for group in configuration['groups'] if source in group['enabledSources']]
 
 
 def personal_receivers(configuration):
@@ -76,7 +76,8 @@ def personal_receivers(configuration):
 
 
 class LifecycleJournal:
-    def __init__(self, path):
+    def __init__(self, path, source='spotify'):
+        self.source = source
         self.transaction = False
         self.path = Path(path)
         self.state = read_json(self.path, {'receivers': {}, 'pending': []})
@@ -85,7 +86,7 @@ class LifecycleJournal:
         return self.state['receivers'].setdefault(identity, {'sessionId': None, 'sequence': 0,
                                                             'accountId': None, 'commands': []})
 
-    def emit(self, specification, action, account=None):
+    def emit(self, specification, action, account=None, details=None):
         receiver = self.receiver(specification.identity)
         if action == 'start':
             if receiver['sessionId'] is not None:
@@ -97,10 +98,12 @@ class LifecycleJournal:
         receiver['sequence'] += 1
         event = {'sessionId': receiver['sessionId'], 'producerId': specification.identity,
                  'eventSequence': receiver['sequence'], 'action': action,
-                 'source': 'spotify', 'ownerId': specification.profile, 'accountId': receiver['accountId'],
+                 'source': self.source, 'ownerId': specification.profile, 'accountId': receiver['accountId'],
                  'destination': specification.destination,
                  'transports': [{'id': specification.stream, 'kind': 'snapcast', 'endpoint': specification.stream,
                                  'available': action not in ('interrupt', 'end')}]}
+        if details:
+            event.update(details)
         self.state['pending'].append(event)
         if action == 'end':
             receiver['sessionId'] = None
@@ -150,7 +153,7 @@ class LifecycleJournal:
         if session is None or any(event['sessionId'] == session for event in self.state['pending']):
             return None
         return {'sessionId': session, 'producerId': specification.identity, 'eventSequence': receiver['sequence'],
-                'action': 'heartbeat', 'source': 'spotify', 'generation': generation}
+                'action': 'heartbeat', 'source': self.source, 'generation': generation}
 
     def abandon(self, session, producer):
         receiver = self.state['receivers'].get(producer)

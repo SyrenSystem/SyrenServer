@@ -3,6 +3,10 @@ services:
     image: localhost/syren-snapserver-profiles
     environment:
       SYREN_PROFILE_SESSIONS: "1"
+      SYREN_CASTING: "1"
+    volumes:
+      - /run/syren-airplay:/dev/shm:ro
+      - /run/syren-avahi-relay:/run/syren-avahi-relay:ro
   syren-server:
     image: localhost/syren-server-profiles
     environment:

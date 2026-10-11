@@ -1,0 +1,57 @@
+diff --git a/common.c b/common.c
+index 898e255..bb21123 100644
+--- a/common.c
++++ b/common.c
+@@ -2372,6 +2372,13 @@ int named_pthread_create_with_priority(pthread_t *thread, int priority,
+     /* Set scheduler policy and priority of pthread */
+     ret = pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
+     if (ret == 0) {
++      // Keep a higher real time priority that the process already runs at.
++      int current_policy;
++      struct sched_param current_parameters;
++      if ((pthread_getschedparam(pthread_self(), &current_policy, &current_parameters) == 0) &&
++          ((current_policy == SCHED_FIFO) || (current_policy == SCHED_RR)) &&
++          (current_parameters.sched_priority > priority))
++        priority = current_parameters.sched_priority;
+       param.sched_priority = priority;
+       ret = pthread_attr_setschedparam(&attr, &param);
+       if (ret == 0) {
+diff --git a/rtsp.c b/rtsp.c
+index 1bd1b87..350695e 100644
+--- a/rtsp.c
++++ b/rtsp.c
+@@ -330,6 +330,11 @@ void release_play_lock(rtsp_conn_info *conn) {
+       mdns_update(txt_records, secondary_txt_records);
+       debug(4, "Connection %d: (%s) has released play lock.", conn->connection_number,
+             get_category_string(conn->airplay_stream_category));
++#ifdef CONFIG_METADATA
++      // Tell the metadata reader that the playing sender has gone.
++      // Queued under the lock like 'prmp', so it comes before the next sender's 'conn'.
++      send_ssnc_metadata('syen', NULL, 0, 0);
++#endif
+     }
+     principal_conn = NULL; // let it go
+   }
+diff --git a/mdns_avahi.c b/mdns_avahi.c
+index cdf8027..d10339c 100644
+--- a/mdns_avahi.c
++++ b/mdns_avahi.c
+@@ -404,10 +404,18 @@ static void client_callback(AvahiClient *c, AvahiClientState state,
+       if (!(client = avahi_client_new(avahi_threaded_poll_get(tpoll), AVAHI_CLIENT_NO_FAIL,
+                                       client_callback, userdata, &err))) {
+         warn("avahi: failed to create a replacement client object: %s", avahi_strerror(err));
++#ifdef CONFIG_METADATA
++        // Tell the metadata reader that this instance is no longer advertised.
++        send_ssnc_metadata('syav', NULL, 0, 0);
++#endif
+         avahi_threaded_poll_quit(tpoll);
+       }
+     } else {
+       warn("avahi: client failure: %s", avahi_strerror(err));
++#ifdef CONFIG_METADATA
++      // Tell the metadata reader that this instance is no longer advertised.
++      send_ssnc_metadata('syav', NULL, 0, 0);
++#endif
+       avahi_threaded_poll_quit(tpoll);
+     }
+     break;

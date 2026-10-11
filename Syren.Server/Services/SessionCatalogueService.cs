@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Syren.Server.Models;
 
 namespace Syren.Server.Services;
@@ -12,10 +13,12 @@ public enum LifecycleOutcome
     UnknownSession,
 }
 
-public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvider clock)
+public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvider clock, CastingDeviceRegistry registry)
 {
     public static readonly TimeSpan InterruptionGrace = TimeSpan.FromSeconds(3);
     public static readonly TimeSpan EndedRetention = TimeSpan.FromHours(1);
+    public static readonly TimeSpan CastingSilence = TimeSpan.FromSeconds(30);
+    private static readonly Regex CastingAccount = new(@"^[\x21-\x7e]{1,256}\z", RegexOptions.CultureInvariant);
 
     // Liveness stays in memory so heartbeats never write the state file.
     // Monotonic timestamps keep liveness steady when the wall clock steps.
@@ -66,7 +69,8 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
         };
     }
 
-    public LifecycleOutcome Apply(SessionLifecycleEvent message) => Apply(message, null, "spotify");
+    public LifecycleOutcome Apply(SessionLifecycleEvent message) =>
+        Apply(message, null, message.Source == "casting" ? "casting" : "spotify");
 
     // Only the server creates PC sessions, after it has checked the profile and made the stream.
     public bool StartPc(SessionLifecycleEvent message, long expectedRevision) =>
@@ -75,9 +79,12 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
     private LifecycleOutcome Apply(SessionLifecycleEvent message, long? expectedRevision, string createdSource)
     {
         LifecycleOutcome outcome = LifecycleOutcome.Ignored;
+        PlaybackSession? createdCasting = null;
         store.Update(current =>
         {
             outcome = LifecycleOutcome.Ignored;
+            createdCasting = null;
+            string? castingKey = current.CastingKey;
             if (current.Version != 3 || (expectedRevision != null && current.Revision != expectedRevision) ||
                 message.Generation != current.Generation || message.EventSequence <= 0 ||
                 string.IsNullOrWhiteSpace(message.SessionId) || string.IsNullOrWhiteSpace(message.ProducerId))
@@ -99,9 +106,18 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                 {
                     return current;
                 }
-                string? owner = message.Source == "spotify"
-                    ? OwnerForAccount(current, message.AccountId)
-                    : current.Profiles.Find(profile => profile.Id == message.OwnerId)?.Id;
+                string? sender = null;
+                if (message.Source == "casting" && ValidCastingAccount(message.AccountId, message.Protocol))
+                {
+                    castingKey ??= Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+                    sender = CastingDeviceId(Convert.FromBase64String(castingKey), message.AccountId!);
+                }
+                string? owner = message.Source switch
+                {
+                    "spotify" => OwnerForAccount(current, message.AccountId),
+                    "casting" => sender == null ? null : CastingOwner(current, sender),
+                    _ => current.Profiles.Find(profile => profile.Id == message.OwnerId)?.Id,
+                };
                 if (owner == null)
                 {
                     return current;
@@ -114,6 +130,8 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                     AccountId = message.AccountId,
                     Source = message.Source,
                     Destination = message.Destination!,
+                    Protocol = sender == null ? null : message.Protocol,
+                    SenderId = sender,
                 };
             }
             if (message.PcMode != null && (session.Source != "laptop" ||
@@ -127,7 +145,7 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                 return current;
             }
             PlaybackSession updated = session with { EventSequence = Math.Max(session.EventSequence, message.EventSequence) };
-            if (session.Source != "spotify" && message.Action is "play" or "pause")
+            if (session.Source is not ("spotify" or "casting") && message.Action is "play" or "pause")
             {
                 return current;
             }
@@ -143,8 +161,9 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                     {
                         return current;
                     }
-                    claim = session.Source == "laptop";
-                    updated = updated with { State = claim ? "playing" : "connected" };
+                    // Casting claims when the sender picks the target but waits for play to become eligible.
+                    claim = session.Source is "laptop" or "casting";
+                    updated = updated with { State = session.Source == "laptop" ? "playing" : "connected" };
                     break;
                 case "play":
                     claim = !session.Claimed;
@@ -199,17 +218,28 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
             {
                 return current;
             }
+            if (message.Action == "start" && updated.Source == "casting")
+            {
+                createdCasting = updated;
+            }
             return current with
             {
                 ClaimSequence = nextClaim,
                 CatalogueRevision = checked(current.CatalogueRevision + 1),
                 Sessions = current.Sessions.Where(candidate => candidate.Id != updated.Id).Append(updated).ToList(),
+                CastingKey = castingKey,
             };
         });
+        // The registry is written after the save, so a name can never make a start fail.
+        if (createdCasting is { SenderId: { } senderId, Protocol: { } protocol } &&
+            CastingKeyKind(createdCasting.AccountId) is "device" or "dacp")
+        {
+            registry.Seen(senderId, message.AccountName, protocol);
+        }
         return outcome;
     }
 
-    // Ends silent PC owners, updates eligibility as grace periods pass, and drops old ended sessions.
+    // Ends silent PC and casting owners, updates eligibility as grace periods pass, and drops old ended sessions.
     public void Expire(bool expireOwners)
     {
         DateTimeOffset now = clock.GetUtcNow();
@@ -231,11 +261,24 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                     }
                     continue;
                 }
-                PlaybackSession updated = expireOwners && session.Source == "laptop" && !Alive(session.Id)
+                PlaybackSession updated = expireOwners && ((session.Source == "laptop" && !Alive(session.Id)) ||
+                    (session.Source == "casting" && Silent(session.Id, CastingSilence)))
                     ? session.End()
                     : Evaluate(session, now);
                 changed |= !Same(updated, session);
                 sessions.Add(updated);
+            }
+            // Apply adds heartbeats under this same lock, so a start that is still saving keeps its heartbeat.
+            HashSet<string> open = sessions.Where(session => session.State != "ended")
+                .Select(session => session.Id).ToHashSet(StringComparer.Ordinal);
+            HashSet<string> known = sessions.Select(session => session.Id).ToHashSet(StringComparer.Ordinal);
+            foreach (string identity in _heartbeats.Keys.Where(identity => !open.Contains(identity)))
+            {
+                _heartbeats.TryRemove(identity, out _);
+            }
+            foreach (string identity in _endedSince.Keys.Where(identity => !known.Contains(identity)))
+            {
+                _endedSince.TryRemove(identity, out _);
             }
             return changed ? current with
             {
@@ -243,23 +286,13 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                 Sessions = sessions,
             } : current;
         });
-        HashSet<string> open = store.Current.Sessions.Where(session => session.State != "ended")
-            .Select(session => session.Id).ToHashSet(StringComparer.Ordinal);
-        HashSet<string> known = store.Current.Sessions.Select(session => session.Id).ToHashSet(StringComparer.Ordinal);
-        foreach (string identity in _heartbeats.Keys.Where(identity => !open.Contains(identity)))
-        {
-            _heartbeats.TryRemove(identity, out _);
-        }
-        foreach (string identity in _endedSince.Keys.Where(identity => !known.Contains(identity)))
-        {
-            _endedSince.TryRemove(identity, out _);
-        }
+        registry.Prune();
     }
 
     public static bool AudioEligible(PlaybackSession session, DateTimeOffset now, bool alive) =>
         session.Claimed && session.State != "ended" &&
         (session.Source == "laptop" || session.State == "playing") &&
-        (alive || session.Source is not ("laptop" or "spotify")) &&
+        (alive || session.Source is not ("laptop" or "spotify" or "casting")) &&
         (session.InterruptedAt is { } interrupted
             ? now - interrupted < InterruptionGrace
             : session.Transports.Any(transport => transport.Available));
@@ -274,22 +307,38 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
             "guest:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(account)));
     }
 
-    // Spotify events must be contiguous; a heartbeat repeats the latest sequence instead of taking a new one.
+    // A keyed hash, because a plain hash of a short device ID could be reversed from the public catalogue.
+    public static string CastingDeviceId(byte[] key, string account) =>
+        Convert.ToHexStringLower(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(account)));
+
+    public static bool ValidCastingAccount(string? account, string? protocol) =>
+        ProfilePlaybackValidation.ValidProtocol(protocol) && account != null &&
+        account.StartsWith(protocol + ":", StringComparison.Ordinal) && CastingAccount.IsMatch(account);
+
+    private static string CastingOwner(PersistentSystemState current, string deviceId) =>
+        current.Profiles.Find(profile => profile.CastingDevices.Any(device => device.Id == deviceId))?.Id ?? "guest:" + deviceId;
+
+    // Accounts look like airplay:device:<id>, so the middle part says how the sender was recognised.
+    private static string? CastingKeyKind(string? account) => account?.Split(':') is [_, string kind, ..] ? kind : null;
+
+    // Spotify and casting events must be contiguous; a heartbeat repeats the latest sequence instead of taking a new one.
     private static bool SequenceAccepted(PlaybackSession session, SessionLifecycleEvent message)
     {
         if (message.Action == "heartbeat")
         {
-            return session.Source == "spotify"
+            return session.Source is "spotify" or "casting"
                 ? message.EventSequence == session.EventSequence
                 : message.EventSequence >= session.EventSequence;
         }
-        return session.Source == "spotify"
+        return session.Source is "spotify" or "casting"
             ? message.EventSequence == session.EventSequence + 1
             : message.EventSequence > session.EventSequence;
     }
 
-    private bool Alive(string sessionId) =>
-        _heartbeats.TryGetValue(sessionId, out long heartbeat) && clock.GetElapsedTime(heartbeat) < InterruptionGrace;
+    private bool Alive(string sessionId) => !Silent(sessionId, InterruptionGrace);
+
+    private bool Silent(string sessionId, TimeSpan limit) =>
+        !_heartbeats.TryGetValue(sessionId, out long heartbeat) || clock.GetElapsedTime(heartbeat) >= limit;
 
     private PlaybackSession Evaluate(PlaybackSession session, DateTimeOffset now) =>
         session with { Eligible = AudioEligible(session, now, Alive(session.Id)) };

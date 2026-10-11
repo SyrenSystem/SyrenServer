@@ -31,6 +31,10 @@ public sealed record PersistentSystemState
         ["spotify"] = "playing", ["laptop"] = "connected", ["casting"] = "connected",
     };
 
+    // Keys the casting device hashes; it is never published.
+    [JsonPropertyName("castingKey")]
+    public string? CastingKey { get; init; }
+
     [JsonPropertyName("sessions")]
     public List<PlaybackSession> Sessions { get; init; } = [];
 

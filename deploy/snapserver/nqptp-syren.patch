@@ -1,0 +1,76 @@
+diff --git a/nqptp-clock-sources.c b/nqptp-clock-sources.c
+index 0ef4b8f..a611c84 100644
+--- a/nqptp-clock-sources.c
++++ b/nqptp-clock-sources.c
+@@ -92,13 +92,20 @@ int get_client_id(char *client_shared_memory_interface_name) {
+ 
+         mode_t oldumask = umask(0);
+         clients[i].shm_fd = shm_open(client_shared_memory_interface_name, O_RDWR | O_CREAT, 0666);
++        (void)umask(oldumask);
++        // A failed record is left empty instead of stopping nqptp, which would end every other client's timing.
+         if (clients[i].shm_fd == -1) {
+-          die("cannot open shared memory \"%s\".", client_shared_memory_interface_name);
++          warn("cannot open shared memory \"%s\".", client_shared_memory_interface_name);
++          clients[i].shm_interface_name[0] = '\0';
++          return -1;
+         }
+-        (void)umask(oldumask);
+ 
+         if (shm_ftruncate(clients[i].shm_fd, sizeof(struct shm_structure)) == -1) {
+-          die("failed to set size of shared memory \"%s\".", client_shared_memory_interface_name);
++          warn("failed to set size of shared memory \"%s\".", client_shared_memory_interface_name);
++          close(clients[i].shm_fd);
++          shm_unlink(client_shared_memory_interface_name);
++          clients[i].shm_interface_name[0] = '\0';
++          return -1;
+         }
+ 
+ #if defined(CONFIG_FOR_FREEBSD) || defined(CONFIG_FOR_DARWIN)
+@@ -114,7 +121,12 @@ int get_client_id(char *client_shared_memory_interface_name) {
+ #endif
+ 
+         if (clients[i].shared_memory == (struct shm_structure *)-1) {
+-          die("failed to mmap shared memory \"%s\".", client_shared_memory_interface_name);
++          warn("failed to mmap shared memory \"%s\".", client_shared_memory_interface_name);
++          clients[i].shared_memory = NULL;
++          close(clients[i].shm_fd);
++          shm_unlink(client_shared_memory_interface_name);
++          clients[i].shm_interface_name[0] = '\0';
++          return -1;
+         }
+ 
+         if ((close(clients[i].shm_fd) == -1)) {
+diff --git a/nqptp-message-handlers.c b/nqptp-message-handlers.c
+index e6b864e..f215525 100644
+--- a/nqptp-message-handlers.c
++++ b/nqptp-message-handlers.c
+@@ -44,6 +44,18 @@ char *hex_string(void *buf, size_t buf_len) {
+   return hexcharbuffer;
+ }
+ 
++// Only the names the SyrenSystem supervisor uses may make a record, so a stray local sender cannot stop nqptp or use up its records.
++static int syren_client_name_allowed(const char *name) {
++  char allowed[32];
++  int slot;
++  for (slot = 0; slot < MAX_CLIENTS; slot++) {
++    snprintf(allowed, sizeof(allowed), "/syren-airplay-%d", slot);
++    if (strcmp(name, allowed) == 0)
++      return 1;
++  }
++  return 0;
++}
++
+ void handle_control_port_messages(char *buf, ssize_t recv_len, uint64_t reception_time) {
+   if (recv_len != -1) {
+     if ((buf != NULL) && (recv_len > 0)) {
+@@ -53,6 +65,10 @@ void handle_control_port_messages(char *buf, ssize_t recv_len, uint64_t receptio
+       char *ip_list = buf;
+       char *smi_name = strsep(&ip_list, " ");
+       char *command = NULL;
++      if ((smi_name != NULL) && (syren_client_name_allowed(smi_name) == 0)) {
++        warn("Ignoring a control message for the unknown interface \"%.64s\".", smi_name);
++        return;
++      }
+       if (smi_name != NULL) {
+         // Every client prefixes its shared memory interface name to every
+         // control message it sends. Honouring it -- rather than parsing it off

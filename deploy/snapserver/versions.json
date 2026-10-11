@@ -1,5 +1,5 @@
 {
-  "checked": "2026-09-09",
+  "checked": "2026-10-08",
   "librespot_release": "0.8.0",
   "librespot_revision": "a1b66d3c8a14e55a9572a9e17467150dca618c9a",
   "recovery_pull_request": "https://github.com/librespot-org/librespot/pull/1692",
@@ -14,5 +14,17 @@
   "snapserver_lifecycle_patch_sha256": "dd3189879fc11d88b598120ae282d69420275332ce59fbe0d46dd9a74cba462b",
   "mosquitto": "2.1.2-alpine",
   "librespot_device_id_patch_sha256": "a7df3a9a3f34b0cfa985877d75fa8d101a362214a066d96613b4fb30b8ca9a9a",
-  "librespot_session_events_patch_sha256": "f51d7bb4d1b181d28eaef47976eebd75807f38af28f881a78fed3c643ccd8e39"
+  "librespot_session_events_patch_sha256": "f51d7bb4d1b181d28eaef47976eebd75807f38af28f881a78fed3c643ccd8e39",
+  "shairport_sync_branch": "development",
+  "shairport_sync_version": "b45f15b-dirty-AirPlay2-smi11-OpenSSL-Avahi-pipe-metadata-sysconfdir:/etc",
+  "shairport_sync_release_line": "5.6-dev, Linux sources identical to 5.6-dev-152",
+  "shairport_sync_revision": "b45f15b32882409a7d39b01293d43da3d5519416",
+  "shairport_sync_syren_patch_sha256": "606cea3dac1d9291c8110d4ee75d88640c72fe6c40d3cf3364e91d697f37b2bc",
+  "nqptp_branch": "development",
+  "nqptp_version": "0a88cd7-dirty",
+  "nqptp_release_line": "1.2.9-dev",
+  "nqptp_revision": "0a88cd7ca9325f023ca5d891714695167672bdb9",
+  "nqptp_syren_patch_sha256": "478ec5d5afd448927c80b0313af0881af4d0bcae5eca7141c84d37aedbd1663b",
+  "nqptp_shm_interface": 11,
+  "debian_ffmpeg": "7:7.1.5-0+deb13u1"
 }

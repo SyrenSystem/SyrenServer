@@ -48,6 +48,7 @@ public sealed class ProfilePlaybackPublisher(
                     {
                         await Publish("Configuration", coordinator.Configuration(), stoppingToken);
                         await Publish("Catalogue", catalogue.Snapshot(), stoppingToken);
+                        await Publish("CastingDevices", coordinator.CastingDevices(), stoppingToken);
                         await Publish("Gains", coordinator.Gains(), stoppingToken);
                         await Publish("Receivers", coordinator.ReceiverState(), stoppingToken);
                         await Publish("Bindings", new

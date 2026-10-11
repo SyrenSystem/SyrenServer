@@ -67,14 +67,21 @@ def discovery_address():
     return match.group(1) if match else None
 
 
-def stop(process):
-    if process and process.poll() is None:
+def stop(*processes, timeout=2):
+    # Every process gets SIGTERM at once and one shared deadline, and one that is still running then is killed.
+    running = [process for process in processes if process and process.poll() is None]
+    for process in running:
         process.terminate()
+    deadline = time.monotonic() + timeout
+    for process in running:
         try:
-            process.wait(timeout=2)
+            process.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=2)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 class SnapControl:
@@ -118,12 +125,12 @@ class SnapControl:
     def streams(self):
         return {stream['id'] for stream in self.request('Server.GetStatus')['server']['streams']}
 
-    def ensure_stream(self, specification, fifo, streams):
+    def ensure_stream(self, specification, fifo, streams, sample_format='44100:16:2'):
         if specification.stream in streams:
             return
         if not fifo.exists():
             os.mkfifo(fifo, 0o600)
-        uri = f'pipe://{fifo}?name={specification.stream}&sampleformat=44100:16:2&codec=pcm'
+        uri = f'pipe://{fifo}?name={specification.stream}&sampleformat={sample_format}&codec=pcm'
         self.request('Stream.AddStream', {'streamUri': uri})
         streams.add(specification.stream)
 

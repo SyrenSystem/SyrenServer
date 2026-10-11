@@ -142,10 +142,18 @@ public sealed class SystemStateStore : ISystemStateStore
                 return migrated;
             }
 
-            PersistentStateFactory.Validate(loaded);
+            PersistentSystemState repaired = loaded.Version == 3
+                ? PersistentStateFactory.DropCastingSessionsWithoutSender(loaded, WarnCastingSessionWithoutSender)
+                : loaded;
+            PersistentStateFactory.Validate(repaired);
             if (loaded.Version == 3 && !_profileSessions)
             {
                 throw new InvalidDataException("Version 3 state requires profile session playback; refusing legacy audio control");
+            }
+            if (!ReferenceEquals(repaired, loaded))
+            {
+                SaveLocked(repaired);
+                loaded = repaired;
             }
             if (loaded.Version == 2 && _profileSessions)
             {
@@ -200,6 +208,11 @@ public sealed class SystemStateStore : ISystemStateStore
             SourcePriority = group.SourcePriority.Order(StringComparer.Ordinal).ToList(),
         }).ToList(),
     };
+
+    private void WarnCastingSessionWithoutSender(string sessionId) => _logger.LogWarning(
+        "Dropping casting session {SessionId}, which a server without casting senders wrote",
+        sessionId
+    );
 
     private void WarnUnknownSource(string groupId, string sourceId) => _logger.LogWarning(
         "Dropping unknown audio source {SourceId} from playback group {GroupId}",

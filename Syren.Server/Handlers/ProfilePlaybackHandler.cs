@@ -76,6 +76,10 @@ public sealed class ProfilePlaybackHandler(
         {
             coordinator.ReceiverStatus(payload);
         }
+        else if (topic == "CastingStatus")
+        {
+            coordinator.CastingStatus(payload);
+        }
     }
 
     private async Task RunCommandAsync(JsonElement payload, string requestId, IMqttClientService client)

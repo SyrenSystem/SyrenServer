@@ -32,10 +32,14 @@ internal sealed class MemoryStateStore : ISystemStateStore
         Changed?.Invoke();
     }
 
+    // Like the real store, an unchanged state is neither saved nor announced, so publisher loops can rest.
     public PersistentSystemState Update(Func<PersistentSystemState, PersistentSystemState> update)
     {
         PersistentSystemState state = update(Current);
-        Save(state);
+        if (!ReferenceEquals(state, Current))
+        {
+            Save(state);
+        }
         return state;
     }
 }
@@ -252,14 +256,30 @@ internal sealed class FakeMqttClientService : IMqttClientService
     private readonly List<(string Topic, object Message, bool Retain, MqttQualityOfServiceLevel Quality)> _published = [];
     private readonly List<string> _cleared = [];
     private int _failuresRemaining;
+    private bool _connected;
+    private int _connectionChecks;
 
     public FakeMqttClientService(int failuresBeforeSuccess = 0)
     {
         _failuresRemaining = failuresBeforeSuccess;
     }
 
-    public bool IsConnected { get; private set; }
+    public bool IsConnected
+    {
+        get
+        {
+            Interlocked.Increment(ref _connectionChecks);
+            return Volatile.Read(ref _connected);
+        }
+    }
+
+    public long ConnectionEpoch { get; set; }
     public int ConnectionAttempts { get; private set; }
+
+    // Publisher loops read the connection once per pass, so tests can wait for a whole pass.
+    public int ConnectionChecks => Volatile.Read(ref _connectionChecks);
+
+    public void SetConnected(bool connected) => Volatile.Write(ref _connected, connected);
 
     public IReadOnlyList<(string Topic, object Message, bool Retain, MqttQualityOfServiceLevel Quality)> Published
     {
@@ -290,13 +310,13 @@ internal sealed class FakeMqttClientService : IMqttClientService
         {
             throw new InvalidOperationException("Broker unavailable");
         }
-        IsConnected = true;
+        SetConnected(true);
         return Task.CompletedTask;
     }
 
     public Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
-        IsConnected = false;
+        SetConnected(false);
         return Task.CompletedTask;
     }
 
@@ -365,17 +385,19 @@ internal static class TestServices
 {
     public static readonly string[] SourceIds = ["spotify", "laptop"];
 
-    public static IOptions<PlaybackOptions> CreatePlaybackOptions(int reconcileSeconds = 5) => Options.Create(
-        new PlaybackOptions
+    public static IOptions<PlaybackOptions> CreatePlaybackOptions(int reconcileSeconds = 5, bool casting = false)
+    {
+        AudioSourceOption[] sources =
+        [
+            new AudioSourceOption { Id = "spotify", Name = "Spotify" },
+            new AudioSourceOption { Id = "laptop", Name = "Laptop audio" },
+        ];
+        return Options.Create(new PlaybackOptions
         {
-            Sources =
-            [
-                new AudioSourceOption { Id = "spotify", Name = "Spotify" },
-                new AudioSourceOption { Id = "laptop", Name = "Laptop audio" },
-            ],
+            Sources = casting ? [.. sources, new AudioSourceOption { Id = "casting", Name = "AirPlay" }] : sources,
             ReconcileSeconds = reconcileSeconds,
-        }
-    );
+        });
+    }
 
     public static DistanceService CreateDistanceService(
         ISnapCastService snapCastService,
@@ -429,11 +451,12 @@ internal static class TestServices
         MemoryStateStore stateStore,
         IDistanceService distanceService,
         RecordingSnapCastService snapCastService,
-        int reconcileSeconds = 5) => new(
+        int reconcileSeconds = 5,
+        bool casting = false) => new(
         stateStore,
         distanceService,
         snapCastService,
-        CreatePlaybackOptions(reconcileSeconds),
+        CreatePlaybackOptions(reconcileSeconds, casting),
         NullLogger<SystemConfigurationService>.Instance
     );
 

@@ -26,6 +26,16 @@ public sealed record ListenerProfile
     public List<SourceOverlap> Overlap { get; init; } = [];
     [JsonPropertyName("spotifyAccountId")]
     public string? SpotifyAccountId { get; init; }
+    [JsonPropertyName("castingDevices")]
+    public List<LinkedCastingDevice> CastingDevices { get; init; } = [];
+}
+
+public sealed record LinkedCastingDevice
+{
+    [JsonPropertyName("id")]
+    public required string Id { get; init; }
+    [JsonPropertyName("name")]
+    public required string Name { get; init; }
 }
 
 public sealed record SourceOverlap
@@ -84,6 +94,13 @@ public sealed record PlaybackSession
     public string? PcMode { get; init; }
     [JsonPropertyName("interruptedAt")]
     public DateTimeOffset? InterruptedAt { get; init; }
+    [JsonPropertyName("protocol")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Protocol { get; init; }
+    // A keyed hash of the sender, so receivers never mix two sessions from one device.
+    [JsonPropertyName("senderId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SenderId { get; init; }
     // The server decides this so receivers never compare clocks.
     [JsonPropertyName("eligible")]
     public bool Eligible { get; init; }
@@ -139,6 +156,12 @@ public sealed record SessionLifecycleEvent
     [JsonPropertyName("pcMode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? PcMode { get; init; }
+    [JsonPropertyName("protocol")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Protocol { get; init; }
+    [JsonPropertyName("accountName")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AccountName { get; init; }
 }
 
 public sealed class ProfileConfigurationCommand : ConfigurationCommand
@@ -159,4 +182,6 @@ public sealed class ProfileConfigurationCommand : ConfigurationCommand
     public string? Source { get; init; }
     [JsonPropertyName("policy")]
     public string? Policy { get; init; }
+    [JsonPropertyName("deviceId")]
+    public string? DeviceId { get; init; }
 }

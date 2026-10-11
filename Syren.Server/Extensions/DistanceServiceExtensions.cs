@@ -20,6 +20,10 @@ public static class DistanceServiceExtensions
         services.AddSingleton<IValidateOptions<StateOptions>, StateOptionsValidator>();
         services.AddOptions<PlaybackOptions>()
             .Bind(configuration.GetSection(PlaybackOptions.SectionName))
+            // Legacy mode has no casting stream for Snapserver, so AirPlay is offered only with profile sessions.
+            .PostConfigure(options => options.Sources = options.ProfileSessions
+                ? options.Sources
+                : options.Sources.Where(source => !PersistentStateFactory.IsCasting(source.Id)).ToArray())
             .ValidateOnStart();
         services.AddSingleton<IValidateOptions<PlaybackOptions>, PlaybackOptionsValidator>();
         services.AddSingleton<ISystemStateStore, SystemStateStore>();
@@ -52,6 +56,7 @@ public static class DistanceServiceExtensions
             return services;
         }
         services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<CastingDeviceRegistry>();
         services.AddSingleton<SessionCatalogueService>();
         services.AddSingleton<ProfileConfigurationService>();
         services.AddSingleton<ProfilePositionService>();

@@ -26,7 +26,7 @@ public static class MqttServiceExtensions
         // Profile mode listens only to version 3 topics, and legacy mode only to the old ones.
         if (DistanceServiceExtensions.ProfileSessions(configuration))
         {
-            foreach (string topic in new[] { "Command", "Lifecycle", "Position", "ReceiverStatus", "SpotifyLinked" })
+            foreach (string topic in new[] { "Command", "Lifecycle", "Position", "ReceiverStatus", "SpotifyLinked", "CastingStatus" })
             {
                 services.AddSingleton<IMqttMessageHandler>(provider => new ProfilePlaybackHandler(
                     provider.GetRequiredService<ProfilePlaybackCoordinator>(), topic,

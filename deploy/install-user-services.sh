@@ -82,10 +82,14 @@ if [ "$(systemctl show "user@$(id -u).service" -p LimitRTPRIO --value)" -lt 95 ]
 fi
 if [ -n "$profile_compose" ]; then
   sleep 5
-  for process in snapserver librespot; do
-    process_id="$(pgrep -x "$process" | head -n 1 || true)"
-    if [ -n "$process_id" ]; then
-      printf '%s scheduling: %s\n' "$process" "$(ps -o cls=,rtprio= -p "$process_id")"
-    fi
+  for process in snapserver librespot shairport-sync; do
+    for process_id in $(pgrep -x "$process" || true); do
+      printf '%s threads:\n' "$process"
+      ps -Lo tid,cls,rtprio,comm -p "$process_id" || true
+    done
   done
+  if pgrep -x nqptp >/dev/null 2>&1; then
+    printf '%s\n' 'nqptp threads:'
+    ps -Lo tid,cls,rtprio,comm -C nqptp || true
+  fi
 fi

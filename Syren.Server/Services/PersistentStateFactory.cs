@@ -104,16 +104,44 @@ internal static class PersistentStateFactory
             options
         );
         var groups = new List<PersistentPlaybackGroup>();
-        if (migrated.Speakers.Count != 0 && sourceIds.Count != 0)
+        List<string> defaultSources = DefaultSources(sourceIds);
+        if (migrated.Speakers.Count != 0 && defaultSources.Count != 0)
         {
             string volumeMode = migrated.Speakers.All(IsCalibrated) ? "automatic" : "manual";
             groups.Add(CreateDefaultGroup(
                 migrated.Speakers.Select(speaker => speaker.SpeakerId!),
-                sourceIds,
+                defaultSources,
                 volumeMode
             ));
         }
         return migrated with { Revision = 1, Groups = groups };
+    }
+
+    public static bool IsCasting(string sourceId) => string.Equals(sourceId, "casting", StringComparison.OrdinalIgnoreCase);
+
+    // AirPlay is turned on per room, so a group the server fills in by itself never offers it.
+    private static List<string> DefaultSources(IReadOnlyList<string> sourceIds) =>
+        sourceIds.Where(sourceId => !IsCasting(sourceId)).ToList();
+
+    // A rolled back server rewrites casting sessions without protocol and sender, and receivers cannot keep those apart.
+    public static PersistentSystemState DropCastingSessionsWithoutSender(PersistentSystemState state, Action<string> warn)
+    {
+        List<PlaybackSession> kept = state.Sessions.Where(session => session.Source != "casting" ||
+            (ProfilePlaybackValidation.ValidProtocol(session.Protocol) && ProfilePlaybackValidation.ValidSenderId(session.SenderId)))
+            .ToList();
+        if (kept.Count == state.Sessions.Count)
+        {
+            return state;
+        }
+        foreach (PlaybackSession session in state.Sessions.Except(kept))
+        {
+            warn(session.Id);
+        }
+        return state with
+        {
+            CatalogueRevision = checked(state.CatalogueRevision + 1),
+            Sessions = kept,
+        };
     }
 
     // Drops source ids that are no longer configured, returning the same instance when nothing changed.
@@ -150,7 +178,7 @@ internal static class PersistentStateFactory
             changed = true;
             groups.Add(group with
             {
-                SourcePriority = kept.Count == 0 ? sourceIds.ToList() : kept,
+                SourcePriority = kept.Count == 0 ? DefaultSources(sourceIds) : kept,
                 SourceLevels = keptLevels,
             });
         }

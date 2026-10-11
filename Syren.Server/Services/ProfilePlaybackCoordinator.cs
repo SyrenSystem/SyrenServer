@@ -11,6 +11,7 @@ public sealed class ProfilePlaybackCoordinator(
     ProfileConfigurationService profiles,
     ProfilePositionService positions,
     PcSessionService pcSessions,
+    CastingDeviceRegistry castingDevices,
     TimeProvider clock)
 {
     private readonly object _sync = new();
@@ -18,6 +19,7 @@ public sealed class ProfilePlaybackCoordinator(
     private readonly Dictionary<string, (JsonElement Status, long Updated)> _receivers = [];
     private readonly Dictionary<string, (string Profile, long Generation, DateTimeOffset Expires)> _links = [];
     private bool _compatibleAppSeen;
+    private bool _castingAvailable;
     public event Action? Changed;
 
     public bool Enabled => store.Current.Version == 3;
@@ -38,6 +40,36 @@ public sealed class ProfilePlaybackCoordinator(
                 id = group.Id, name = group.Name, speakerIds = group.SpeakerIds,
                 enabledSources = group.SourcePriority, sourceLevels = group.SourceLevels,
                 masterVolume = group.MasterVolume, muted = group.Muted,
+            }).ToArray(),
+        };
+    }
+
+    // Recently seen casting devices, with names and owners but never the account a producer sent.
+    public object CastingDevices()
+    {
+        PersistentSystemState current = store.Current;
+        bool available;
+        lock (_sync)
+        {
+            available = _castingAvailable;
+        }
+        return new
+        {
+            stateId = current.StateId,
+            // The app offers AirPlay only while the audio service runs its casting supervisor.
+            available,
+            devices = castingDevices.Devices().Select(device =>
+            {
+                string? profileId = current.Profiles.Find(profile =>
+                    profile.CastingDevices.Any(linked => linked.Id == device.Id))?.Id;
+                return new
+                {
+                    id = device.Id, name = device.Name, protocol = device.Protocol, lastSeen = device.LastSeen,
+                    playing = current.Sessions.Any(session => session.Source == "casting" && session.SenderId == device.Id &&
+                        session.State == "playing"),
+                    connected = device.Connected,
+                    profileId, ownerId = profileId ?? "guest:" + device.Id,
+                };
             }).ToArray(),
         };
     }
@@ -101,6 +133,22 @@ public sealed class ProfilePlaybackCoordinator(
         return accepted;
     }
 
+    // The casting supervisor keeps its status retained, and its will clears it when the supervisor dies.
+    public void CastingStatus(JsonElement payload)
+    {
+        bool available = payload.ValueKind == JsonValueKind.Object &&
+            payload.TryGetProperty("available", out JsonElement value) && value.ValueKind == JsonValueKind.True;
+        lock (_sync)
+        {
+            if (_castingAvailable == available)
+            {
+                return;
+            }
+            _castingAvailable = available;
+        }
+        Changed?.Invoke();
+    }
+
     public bool ReceiverStatus(JsonElement payload)
     {
         if (!Enabled || payload.GetProperty("generation").GetInt64() != catalogue.Generation ||
@@ -148,9 +196,14 @@ public sealed class ProfilePlaybackCoordinator(
             return new CommandResultMessage { RequestId = requestId, Success = false, Revision = current.Revision, Error = "Stale configuration or incompatible controller" };
         }
         string action = Text(payload, "action");
-        if (action is "profile" or "policy" or "unlink")
+        if (action is "profile" or "policy" or "unlink" or "linkCasting" or "unlinkCasting" or "forgetCasting")
         {
             CommandResultMessage configured = profiles.Configure(payload.Deserialize<ProfileConfigurationCommand>()!);
+            if (action == "forgetCasting" && configured.Success)
+            {
+                // Forgetting saves nothing, so the device list is published again from here.
+                Changed?.Invoke();
+            }
             if (action == "unlink" && configured.Success)
             {
                 lock (_sync)
