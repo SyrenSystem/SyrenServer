@@ -625,6 +625,113 @@ class CastingSupervisorTests(unittest.TestCase):
         self.assertIsNotNone(self.target()['process'])
         self.assertIsNot(first, self.target()['process'])
 
+    def acknowledge(self, session):
+        # The first catalogue of a generation brings a reconcile, which the second one acknowledges.
+        for revision in (1, 2):
+            self.supervisor.message('Catalogue', {'generation': 1, 'revision': revision, 'sessions': [
+                {'id': session, 'state': 'playing', 'eventSequence': revision + 1}]})
+        self.assertEqual([], self.supervisor.journal.state['pending'])
+
+    def lifecycle(self):
+        return [(message, qos) for topic, message, qos in self.published if topic == 'Lifecycle']
+
+    def test_the_sender_volume_rides_on_heartbeats_and_goes_out_at_once_on_change(self):
+        self.configure()
+        session = self.play()
+        journal = (self.directory / 'state' / 'lifecycle.json').read_text()
+        # The start and play events are not acknowledged yet, so a heartbeat would outrun them.
+        self.send('office', ('pvol', '-24.00,0.00,0.00,0.00'))
+        self.assertEqual([], self.lifecycle())
+        self.assertEqual(journal, (self.directory / 'state' / 'lifecycle.json').read_text())
+        self.acknowledge(session)
+        heartbeat = {'sessionId': session, 'producerId': self.identity('office'), 'eventSequence': 3, 'action': 'heartbeat',
+                     'source': 'casting', 'generation': 1, 'volume': 0.019498}
+        self.assertEqual([(heartbeat, 0)], self.lifecycle())
+        self.published.clear()
+        self.supervisor.prepare_heartbeats()
+        self.supervisor.publish_heartbeats()
+        self.assertEqual([(heartbeat, 0)], self.lifecycle())
+        self.published.clear()
+        self.send('office', ('pvol', '-144.00,0.00,0.00,0.00'))
+        self.assertEqual([(dict(heartbeat, volume=0.000001), 0)], self.lifecycle())
+        # The same volume again, or one that does not parse, sends nothing extra.
+        self.send('office', ('pvol', '-144.00,0.00,0.00,0.00'), ('pvol', 'loud'))
+        self.assertEqual(1, len(self.lifecycle()))
+        self.online = False
+        self.send('office', ('pvol', '0.00,0.00,0.00,0.00'))
+        self.assertEqual(1, len(self.lifecycle()))
+        self.online = True
+        self.supervisor.prepare_heartbeats()
+        self.supervisor.publish_heartbeats()
+        self.assertEqual((dict(heartbeat, volume=1.0), 0), self.lifecycle()[-1])
+        # The volume never reaches the journal, so it never takes an event number.
+        self.assertNotIn('volume', (self.directory / 'state' / 'lifecycle.json').read_text())
+        self.assertEqual([], self.supervisor.journal.state['pending'])
+
+    def test_a_volume_held_back_by_unsent_events_goes_out_with_the_acknowledgement(self):
+        self.configure()
+        session = self.play()
+        self.send('office', ('pvol', '-24.00,0.00,0.00,0.00'))
+        self.assertEqual([], self.lifecycle())
+        # Only the catalogue arrives, so no loop step and no heartbeat tick sends it.
+        self.acknowledge(session)
+        self.assertEqual([0.019498], [message.get('volume') for message, qos in self.lifecycle()])
+        self.assertEqual(('heartbeat', 0), (self.lifecycle()[0][0]['action'], self.lifecycle()[0][1]))
+        # A later catalogue that changes nothing for the session sends no extra heartbeat.
+        self.supervisor.message('Catalogue', {'generation': 1, 'revision': 3, 'sessions': [
+            {'id': session, 'state': 'playing', 'eventSequence': 3}]})
+        self.assertEqual(1, len(self.lifecycle()))
+
+    def test_a_heartbeat_tick_after_a_volume_change_never_sends_the_old_volume(self):
+        self.configure()
+        session = self.play()
+        self.send('office', ('pvol', '-24.00,0.00,0.00,0.00'))
+        self.acknowledge(session)
+        self.supervisor.prepare_heartbeats()
+        self.published.clear()
+        self.send('office', ('pvol', '0.00,0.00,0.00,0.00'))
+        # The heartbeat thread ticks before the loop gets to prepare the heartbeats again.
+        self.supervisor.publish_heartbeats()
+        self.assertEqual([1.0, 1.0], [message['volume'] for message, qos in self.lifecycle()])
+
+    def test_the_heartbeat_thread_waits_while_a_volume_goes_out(self):
+        self.configure()
+        session = self.play()
+        self.send('office', ('pvol', '-24.00,0.00,0.00,0.00'))
+        self.acknowledge(session)
+        self.supervisor.prepare_heartbeats()
+        self.published.clear()
+        stale = self.supervisor.heartbeats
+        ticked = []
+        original = self.publish
+
+        def publish(topic, message, qos=1, retain=False):
+            # The tick runs while the new volume is being sent, as the thread would.
+            if not ticked:
+                ticked.append(threading.Thread(target=self.supervisor.publish_heartbeats))
+                ticked[0].start()
+                ticked[0].join(0.2)
+            return original(topic, message, qos, retain)
+
+        self.supervisor.publish = publish
+        self.send('office', ('pvol', '0.00,0.00,0.00,0.00'))
+        ticked[0].join(2)
+        self.assertIsNot(stale, self.supervisor.heartbeats)
+        self.assertEqual([1.0, 1.0], [message['volume'] for message, qos in self.lifecycle()])
+
+    def test_a_new_sender_heartbeat_has_no_volume_until_it_sends_one(self):
+        self.configure()
+        session = self.play()
+        self.send('office', ('pvol', '-15.00,0.00,0.00,0.00'))
+        self.acknowledge(session)
+        self.send('office', 'syen', ('conn', '192.0.2.10'))
+        self.assertEqual(['interrupt'], [event['action'] for event in self.supervisor.journal.state['pending']])
+        self.supervisor.message('Catalogue', {'generation': 1, 'revision': 3, 'sessions': [
+            {'id': session, 'state': 'playing', 'eventSequence': 4}]})
+        self.supervisor.prepare_heartbeats()
+        self.assertEqual([session], [event['sessionId'] for process, event in self.supervisor.heartbeats])
+        self.assertNotIn('volume', self.supervisor.heartbeats[0][1])
+
     def catalogue(self, generation, revision, *sessions):
         return {'generation': generation, 'revision': revision,
                 'sessions': [{'id': session, 'state': 'playing', 'eventSequence': 0} for session in sessions]}

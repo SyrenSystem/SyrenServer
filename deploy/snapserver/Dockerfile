@@ -23,6 +23,10 @@ COPY librespot-session-events.patch /tmp/librespot-session-events.patch
 RUN git apply --check /tmp/librespot-session-events.patch \
     && git apply /tmp/librespot-session-events.patch
 
+COPY librespot-external-volume.patch /tmp/librespot-external-volume.patch
+RUN git apply --check /tmp/librespot-external-volume.patch \
+    && git apply /tmp/librespot-external-volume.patch
+
 RUN cargo test --locked --workspace \
     --no-default-features \
     --features rustls-tls-webpki-roots,with-libmdns
@@ -50,8 +54,8 @@ RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_CLIENT=OFF -
 COPY smoke_snapserver.py /tmp/smoke_snapserver.py
 RUN python3 /tmp/smoke_snapserver.py --executable /source/snapcast/bin/snapserver
 
-COPY spotify_destination_probe.py spotify_sessions.py spotify_supervisor.py casting_sessions.py casting_supervisor.py casting_dbus_relay.py start-profile-audio.py \
-    test_spotify_destination_probe.py test_spotify_sessions.py test_spotify_control.py \
+COPY spotify_destination_probe.py spotify_event.py spotify_sessions.py spotify_supervisor.py casting_sessions.py casting_supervisor.py casting_dbus_relay.py start-profile-audio.py \
+    test_spotify_destination_probe.py test_spotify_sessions.py test_spotify_control.py test_spotify_event.py \
     test_casting_sessions.py test_casting_supervisor.py test_casting_dbus_relay.py test_start_profile_audio.py /tmp/spotify-probe/
 COPY host/ /tmp/spotify-probe/host/
 RUN python3 -m unittest discover -s /tmp/spotify-probe -p 'test_*.py' -v

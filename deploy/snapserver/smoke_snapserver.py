@@ -41,7 +41,7 @@ enabled = false
 [stream]
 bind_to_address = 127.0.0.1
 port = {ports['stream']}
-source = tcp://127.0.0.1:{ports['spotify']}?name=spotify&mode=server&sampleformat=48000:16:2&idle_threshold=100&codec=pcm
+source = tcp://127.0.0.1:{ports['spotify']}?name=spotify&mode=server&sampleformat=48000:16:2&idle_threshold=100&codec=flac
 source = tcp://127.0.0.1:{ports['laptop']}?name=laptop&mode=server&sampleformat=48000:16:2&idle_threshold=100&codec=pcm
 ''')
         with (directory / 'server.log').open('w') as log:

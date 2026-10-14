@@ -86,6 +86,8 @@ class CastingSupervisor:
         self.next_reconcile = 0
         self.reconcile_delay = RECONCILE_SECONDS
         self.heartbeats = ()
+        # Held while heartbeats go out, so the thread never sends an old volume after a new one.
+        self.heartbeat_lock = threading.Lock()
         self.dbus_ok = False
         self.dbus_next_check = 0
         self.dbus_checking = False
@@ -487,13 +489,17 @@ class CastingSupervisor:
         if kind == 'stderr':
             self.instance_log(identity, token, slot, data)
         elif current:
+            mapper = target['mapper']
+            volume = mapper.volume
             for item_type, code, payload in target['parser'].feed(data):
                 if self.trace:
                     log(self.trace.format(slot, item_type, code, payload))
                 if item_type == 'ssnc' and code == AVAHI_LOST:
                     self.lost_avahi(target, slot)
                 for event in target['adapter'].feed(item_type, code, payload):
-                    target['mapper'].handle(event)
+                    mapper.handle(event)
+            if mapper.volume is not None and mapper.volume != volume:
+                self.publish_volume(target)
 
     def lost_avahi(self, target, slot):
         if target['unadvertised']:
@@ -535,23 +541,42 @@ class CastingSupervisor:
             sent[key] = previous
         self.sent = sent
 
+    def heartbeat(self, target):
+        # The volume rides on the heartbeat only, so the journal never stores or numbers it.
+        event = self.journal.heartbeat(target['specification'], self.configuration['generation'])
+        if event and target['mapper'].volume is not None:
+            event['volume'] = target['mapper'].volume
+        return event
+
     def prepare_heartbeats(self):
         # The heartbeat thread only reads this tuple, so it never touches the journal while the loop changes it.
         heartbeats = []
         if self.configuration:
             for target in self.targets.values():
                 if target['process'] is not None:
-                    event = self.journal.heartbeat(target['specification'], self.configuration['generation'])
+                    event = self.heartbeat(target)
                     if event:
                         heartbeats.append((target['process'], event))
         self.heartbeats = tuple(heartbeats)
 
+    def publish_volume(self, target):
+        # A new sender volume goes out at once, and a session with unsent events gets it with the first heartbeat after them.
+        if not self.configuration or not self.connected() or target['process'] is None:
+            return
+        with self.heartbeat_lock:
+            # The tuple is rebuilt first, so every later tick of the thread carries the new volume too.
+            self.prepare_heartbeats()
+            for process, event in self.heartbeats:
+                if process is target['process']:
+                    self.publish('Lifecycle', event, 0)
+
     def publish_heartbeats(self):
         if not self.connected():
             return
-        for process, event in self.heartbeats:
-            if process.poll() is None:
-                self.publish('Lifecycle', event, 0)
+        with self.heartbeat_lock:
+            for process, event in self.heartbeats:
+                if process.poll() is None:
+                    self.publish('Lifecycle', event, 0)
 
     def send_heartbeats(self):
         while not self.stopped.wait(HEARTBEAT_SECONDS):
@@ -588,6 +613,8 @@ class CastingSupervisor:
             ended = {session['id'] for session in message['sessions'] if session['state'] == 'ended'}
             dropped = [target for target in self.targets.values()
                        if target['mapper'].connected and target['mapper'].session in ended]
+            waiting = [target for target in self.targets.values()
+                       if target['process'] is not None and target['mapper'].volume is not None and not self.heartbeat(target)]
             self.journal.acknowledge(message)
             for target in dropped:
                 log(f'AirPlay instance {target["specification"].slot} restarts, because the server ended its session')
@@ -599,6 +626,9 @@ class CastingSupervisor:
                 for target in self.targets.values():
                     if target['mapper'].session in listed:
                         target['mapper'].reconcile()
+            # A volume that waited for its session's events goes out with the first heartbeat allowed after them.
+            for target in waiting:
+                self.publish_volume(target)
         elif kind == 'LifecycleRejected' and self.configuration and message.get('generation') == self.configuration['generation']:
             producer, session = message.get('producerId'), message.get('sessionId')
             active = session is not None and self.journal.state['receivers'].get(producer, {}).get('sessionId') == session

@@ -57,6 +57,7 @@ public static class DistanceServiceExtensions
         }
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<CastingDeviceRegistry>();
+        services.AddSingleton<ProducerVolumeStore>();
         services.AddSingleton<SessionCatalogueService>();
         services.AddSingleton<ProfileConfigurationService>();
         services.AddSingleton<ProfilePositionService>();

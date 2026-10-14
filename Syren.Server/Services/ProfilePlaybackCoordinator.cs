@@ -12,6 +12,7 @@ public sealed class ProfilePlaybackCoordinator(
     ProfilePositionService positions,
     PcSessionService pcSessions,
     CastingDeviceRegistry castingDevices,
+    ProducerVolumeStore volumes,
     TimeProvider clock)
 {
     private readonly object _sync = new();
@@ -115,6 +116,13 @@ public sealed class ProfilePlaybackCoordinator(
         LifecycleOutcome outcome = catalogue.Apply(payload.Deserialize<SessionLifecycleEvent>()!);
         if (outcome == LifecycleOutcome.Accepted)
         {
+            // A bad volume is skipped on its own, so it never costs the event it came with.
+            if (payload.TryGetProperty("volume", out JsonElement volume) && volume.ValueKind == JsonValueKind.Number &&
+                volume.TryGetDouble(out double value))
+            {
+                volumes.Set(Text(payload, "producerId"), value);
+            }
+            // Accepted events wake the publisher, which also sends gains for a new volume.
             Changed?.Invoke();
         }
         return outcome;

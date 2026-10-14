@@ -9,6 +9,7 @@ public sealed class ProfilePlaybackPublisher(
     SessionCatalogueService catalogue,
     SessionTransportBindings bindings,
     ISystemStateStore store,
+    ProducerVolumeStore volumes,
     IMqttClientService mqtt,
     TimeProvider clock,
     ILogger<ProfilePlaybackPublisher> logger) : BackgroundService
@@ -67,6 +68,7 @@ public sealed class ProfilePlaybackPublisher(
                 {
                     _published.Clear();
                 }
+                volumes.SaveIfDue();
                 await _signal.WaitAsync(TimeSpan.FromMilliseconds(100), stoppingToken);
             }
         }
@@ -74,6 +76,7 @@ public sealed class ProfilePlaybackPublisher(
         {
             store.Changed -= Signal;
             coordinator.Changed -= Signal;
+            volumes.Flush();
         }
     }
 

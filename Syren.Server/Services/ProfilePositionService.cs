@@ -2,9 +2,11 @@ using Syren.Server.Models;
 
 namespace Syren.Server.Services;
 
-public sealed class ProfilePositionService(ISystemStateStore store, TimeProvider clock)
+public sealed class ProfilePositionService(ISystemStateStore store, TimeProvider clock, ProducerVolumeStore volumes)
 {
     private const int RememberedSelections = 64;
+    // About 120 dB down; receivers drop a session with gain 0 and let the next claimant play instead.
+    public const double SilentGain = 1e-6;
     private readonly object _sync = new();
     private readonly Dictionary<string, PositionOwner> _owners = [];
 
@@ -93,6 +95,9 @@ public sealed class ProfilePositionService(ISystemStateStore store, TimeProvider
                         {
                             gain *= PositionGain(profile.Id, speaker);
                         }
+                        // The producer's own volume, such as the Spotify app slider, scales every speaker of its session.
+                        // A producer turned down to zero stays just above zero, so its session still holds the speaker in silence.
+                        gain = gain > 0 ? Math.Max(SilentGain, Math.Clamp(gain * volumes.Volume(session.ProducerId), 0, 1)) : 0;
                     }
                     gains[session.Id] = gain;
                 }

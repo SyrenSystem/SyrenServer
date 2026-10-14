@@ -41,6 +41,16 @@ class SpotifySessionsTests(unittest.TestCase):
             self.journal.handle(self.specification, {'event': event})
         self.assertEqual(1, sum(event['action'] == 'play' for event in self.journal.events(1)))
 
+    def test_loading_a_new_track_keeps_the_transport(self):
+        self.intent('play', 'first')
+        self.journal.handle(self.specification, {'event': 'playing'})
+        self.journal.handle(self.specification, {'event': 'loading'})
+        events = self.journal.events(1)
+        self.assertNotIn('interrupt', [event['action'] for event in events])
+        self.assertTrue(events[-1]['transports'][0]['available'])
+        self.journal.handle(self.specification, {'event': 'stopped'})
+        self.assertEqual('interrupt', self.journal.events(1)[-1]['action'])
+
     def test_new_transfer_after_end_uses_new_session(self):
         self.intent('play', 'first')
         first = self.journal.events(1)[0]['sessionId']

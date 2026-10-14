@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging.Abstractions;
 using MQTTnet;
 using Syren.Server.Handlers;
@@ -22,11 +23,13 @@ public sealed class ProfilePlaybackTests
     });
     private readonly CastingDeviceRegistry _registry;
     private readonly SessionCatalogueService _catalogue;
+    private readonly ProducerVolumeStore _volumes;
 
     public ProfilePlaybackTests()
     {
         _registry = new CastingDeviceRegistry(_store, _clock);
         _catalogue = new SessionCatalogueService(_store, _clock, _registry);
+        _volumes = new ProducerVolumeStore(null, _clock);
     }
 
     private PlaybackSession Session => _store.Current.Sessions.Single();
@@ -236,7 +239,7 @@ public sealed class ProfilePlaybackTests
     public void OnlyTheSelectedReporterCanUpdatePositionAndReadingsExpire()
     {
         PrepareSpeaker();
-        var positions = new ProfilePositionService(_store, _clock);
+        var positions = new ProfilePositionService(_store, _clock, _volumes);
         string firstLease = positions.Select("first", "phone", 1, 0)!;
         Assert.True(positions.Report("first", "phone", firstLease, 1, new Dictionary<string, double> { ["sensor"] = 1000 }, 0));
         Assert.Equal(0.25, positions.DesiredGains()["speaker"]["session"]);
@@ -252,7 +255,7 @@ public sealed class ProfilePlaybackTests
     [Fact]
     public void SelectionHistoryKeepsOwnersAndStaysBounded()
     {
-        var positions = new ProfilePositionService(_store, _clock);
+        var positions = new ProfilePositionService(_store, _clock, _volumes);
         Assert.NotNull(positions.Select("first", "kept", 1, 0));
         for (int launch = 0; launch < 200; launch++)
         {
@@ -268,7 +271,7 @@ public sealed class ProfilePlaybackTests
     public void ProfileSwitchClearsPreviousContributionWithoutTransferringPcSession()
     {
         PrepareSpeaker();
-        var positions = new ProfilePositionService(_store, _clock);
+        var positions = new ProfilePositionService(_store, _clock, _volumes);
         string lease = positions.Select("first", "app", 1, 0)!;
         positions.Report("first", "app", lease, 1, new Dictionary<string, double> { ["sensor"] = 1000 }, 0);
         positions.Select("second", "app", 2, 0);
@@ -659,7 +662,7 @@ public sealed class ProfilePlaybackTests
         ProfilePlaybackCoordinator coordinator = Coordinator();
         var bindings = new SessionTransportBindings(coordinator, _store, new RecordingSnapCastService(),
             NullLogger<SessionTransportBindings>.Instance);
-        using var publisher = new ProfilePlaybackPublisher(coordinator, _catalogue, bindings, _store, mqtt, _clock,
+        using var publisher = new ProfilePlaybackPublisher(coordinator, _catalogue, bindings, _store, _volumes, mqtt, _clock,
             NullLogger<ProfilePlaybackPublisher>.Instance);
         _catalogue.BeginGeneration();
         Accepted(CastingEvent("start", 1));
@@ -1314,13 +1317,362 @@ public sealed class ProfilePlaybackTests
         Assert.Single(snapcast.GroupStreamChanges);
     }
 
-    private ProfilePlaybackCoordinator Coordinator(RecordingSnapCastService? snapcast = null, bool casting = false)
+    [Fact]
+    public void ProducerVolumeScalesGainsWithoutChangingRevisions()
+    {
+        ProfilePlaybackCoordinator coordinator = PrepareSpotifyGains();
+        Assert.Equal(0.4, SpotifyGain(coordinator), 10);
+        PersistentSystemState written = _store.Current;
+        Assert.Equal(LifecycleOutcome.Accepted, coordinator.Lifecycle(Payload(Event("heartbeat", 2), 0.5)));
+        Assert.Equal(0.2, SpotifyGain(coordinator), 10);
+        Assert.Same(written, _store.Current);
+        JsonElement gains = JsonSerializer.SerializeToElement(coordinator.Gains());
+        Assert.Equal(written.Revision, gains.GetProperty("configurationRevision").GetInt64());
+        Assert.Equal(written.CatalogueRevision, gains.GetProperty("catalogueRevision").GetInt64());
+        // A bad volume is skipped, but the heartbeat that carried it still counts.
+        foreach (object invalid in new object[] { "loud", 1.5, -0.1, true })
+        {
+            Assert.Equal(LifecycleOutcome.Accepted, coordinator.Lifecycle(Payload(Event("heartbeat", 2), invalid)));
+            Assert.Equal(0.2, SpotifyGain(coordinator), 10);
+        }
+        Assert.Equal(LifecycleOutcome.Accepted, coordinator.Lifecycle(Payload(Event("pause", 3))));
+        Assert.Equal(0.2, SpotifyGain(coordinator), 10);
+        // An event the catalogue refuses never sets a volume.
+        Assert.Equal(LifecycleOutcome.Ignored, coordinator.Lifecycle(Payload(Event("heartbeat", 3) with { ProducerId = "other" }, 0.1)));
+        Assert.Equal(1.0, _volumes.Volume("other"));
+        Assert.Equal(LifecycleOutcome.Accepted, coordinator.Lifecycle(Payload(Event("heartbeat", 3), 0)));
+        Assert.Equal(ProfilePositionService.SilentGain, SpotifyGain(coordinator));
+        Assert.Equal(LifecycleOutcome.Accepted, coordinator.Lifecycle(Payload(Event("heartbeat", 3), 1)));
+        Assert.Equal(0.4, SpotifyGain(coordinator), 10);
+    }
+
+    [Fact]
+    public void ProducerVolumeKeepsGainsWithinRange()
+    {
+        ProfilePlaybackCoordinator coordinator = PrepareSpotifyGains();
+        _store.Save(_store.Current with
+        {
+            Speakers = [_store.Current.Speakers.Single() with { Volume = 400 }],
+        });
+        Assert.Equal(1, SpotifyGain(coordinator));
+        coordinator.Lifecycle(Payload(Event("heartbeat", 2), 0.1));
+        Assert.Equal(0.2, SpotifyGain(coordinator), 10);
+    }
+
+    [Fact]
+    public async Task ProducerVolumeRepublishesOnlyGainsAndIsSavedOnShutdown()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"syren-volumes-{Guid.NewGuid():N}");
+        string path = Path.Combine(directory, ProducerVolumeStore.FileName);
+        try
+        {
+            var volumes = new ProducerVolumeStore(path, _clock);
+            ProfilePlaybackCoordinator coordinator = PrepareSpotifyGains(volumes);
+            var mqtt = new FakeMqttClientService { ConnectionEpoch = 1 };
+            mqtt.SetConnected(true);
+            var bindings = new SessionTransportBindings(coordinator, _store, new RecordingSnapCastService(),
+                NullLogger<SessionTransportBindings>.Instance);
+            using var publisher = new ProfilePlaybackPublisher(coordinator, _catalogue, bindings, _store, volumes, mqtt, _clock,
+                NullLogger<ProfilePlaybackPublisher>.Instance);
+            await publisher.StartAsync(CancellationToken.None);
+            try
+            {
+                await PublisherPasses(mqtt);
+                int Count(string topic) => mqtt.Published.Count(publish => publish.Topic == ProfilePlaybackHandler.Prefix + topic);
+                double PublishedGain() => Published(mqtt, "Gains").GetProperty("gains").GetProperty("speaker").GetProperty("session").GetDouble();
+                int configurations = Count("Configuration");
+                int catalogues = Count("Catalogue");
+                Assert.Equal(0.4, PublishedGain(), 10);
+                coordinator.Lifecycle(Payload(Event("heartbeat", 2), 0.5));
+                await TestServices.WaitUntilAsync(() => Math.Abs(PublishedGain() - 0.2) < 1e-9);
+                await TestServices.WaitUntilAsync(() => File.Exists(path));
+                Assert.Equal(0.5, SavedVolumes(path)["receiver"]);
+                // The second change falls inside the save interval, so only shutdown writes it.
+                coordinator.Lifecycle(Payload(Event("heartbeat", 2), 0.25));
+                await TestServices.WaitUntilAsync(() => Math.Abs(PublishedGain() - 0.1) < 1e-9);
+                await PublisherPasses(mqtt);
+                Assert.Equal(0.5, SavedVolumes(path)["receiver"]);
+                Assert.Equal(configurations, Count("Configuration"));
+                Assert.Equal(catalogues, Count("Catalogue"));
+            }
+            finally
+            {
+                await publisher.StopAsync(CancellationToken.None);
+            }
+            Assert.Equal(0.25, SavedVolumes(path)["receiver"]);
+            Assert.Equal(0.25, new ProducerVolumeStore(path, _clock).Volume("receiver"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ProducerVolumesAreSavedAtMostOncePerIntervalAndOnlyWhenChanged()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"syren-volumes-{Guid.NewGuid():N}");
+        string path = ProducerVolumeStore.PathNextTo(Path.Combine(directory, "state.json"));
+        Assert.Equal(Path.Combine(directory, "producer-volumes.json"), path);
+        try
+        {
+            var volumes = new ProducerVolumeStore(path, _clock);
+            Assert.Equal(1.0, volumes.Volume("first"));
+            volumes.SaveIfDue();
+            Assert.False(File.Exists(path));
+            Assert.True(volumes.Set("first", 0.5));
+            Assert.False(volumes.Set("first", 0.5));
+            Assert.False(volumes.Set("first", double.NaN));
+            Assert.False(volumes.Set("first", 2));
+            volumes.SaveIfDue();
+            Assert.Equal(0.5, SavedVolumes(path)["first"]);
+            volumes.Set("first", 0.4);
+            volumes.SaveIfDue();
+            _clock.Advance((int)ProducerVolumeStore.SaveInterval.TotalSeconds - 1);
+            volumes.SaveIfDue();
+            Assert.Equal(0.5, SavedVolumes(path)["first"]);
+            _clock.Advance(1);
+            volumes.SaveIfDue();
+            Assert.Equal(0.4, SavedVolumes(path)["first"]);
+            // Nothing changed, so nothing is written even after the interval.
+            File.Delete(path);
+            _clock.Advance(60);
+            volumes.SaveIfDue();
+            volumes.Flush();
+            Assert.False(File.Exists(path));
+            volumes.Set("second", 0.3);
+            volumes.Flush();
+            Assert.Equal(new Dictionary<string, double> { ["first"] = 0.4, ["second"] = 0.3 }, SavedVolumes(path));
+            var loaded = new ProducerVolumeStore(path, _clock);
+            Assert.Equal(0.4, loaded.Volume("first"));
+            Assert.Equal(0.3, loaded.Volume("second"));
+            Assert.Equal(1.0, loaded.Volume("unknown"));
+            File.WriteAllText(path, """{"first": 0.6, "second": "loud", "third": 7, "fourth": -1}""");
+            loaded = new ProducerVolumeStore(path, _clock);
+            Assert.Equal(0.6, loaded.Volume("first"));
+            Assert.Equal(1.0, loaded.Volume("second"));
+            Assert.Equal(1.0, loaded.Volume("third"));
+            Assert.Equal(1.0, loaded.Volume("fourth"));
+            File.WriteAllText(path, "not json");
+            Assert.Equal(1.0, new ProducerVolumeStore(path, _clock).Volume("first"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PausedSpotifySessionEndsAfterTwelveHours()
+    {
+        _catalogue.BeginGeneration();
+        Accepted(Event("start", 1));
+        Accepted(Event("play", 2));
+        Accepted(Event("pause", 3));
+        _catalogue.Expire(expireOwners: true);
+        _clock.Advance((int)SessionCatalogueService.PausedSpotifyLimit.TotalSeconds - 1);
+        Assert.True(Accepted(Event("heartbeat", 3)));
+        _catalogue.Expire(expireOwners: true);
+        Assert.Equal("paused", Session.State);
+        long revision = _store.Current.CatalogueRevision;
+        _clock.Advance(1);
+        _catalogue.Expire(expireOwners: true);
+        Assert.Equal("ended", Session.State);
+        Assert.Equal("ended", _catalogue.Snapshot().Sessions.Single().State);
+        Assert.Equal(revision + 1, _store.Current.CatalogueRevision);
+        Assert.False(Accepted(Event("heartbeat", 3)));
+        Assert.False(Accepted(Event("play", 4)));
+    }
+
+    [Fact]
+    public void PlayingSpotifySessionsNeverExpireAndPlayingRestartsThePausedPeriod()
+    {
+        _catalogue.BeginGeneration();
+        Accepted(Event("start", 1));
+        Accepted(Event("play", 2));
+        for (int hour = 0; hour < 48; hour++)
+        {
+            _clock.Advance(3600);
+            Accepted(Event("heartbeat", 2));
+            _catalogue.Expire(expireOwners: true);
+        }
+        Assert.Equal("playing", Session.State);
+        Accepted(Event("pause", 3));
+        _catalogue.Expire(expireOwners: true);
+        _clock.Advance(11 * 3600);
+        _catalogue.Expire(expireOwners: true);
+        // Play and pause between two expiry passes still restart the paused period.
+        Accepted(Event("play", 4));
+        Accepted(Event("pause", 5));
+        _catalogue.Expire(expireOwners: true);
+        _clock.Advance(11 * 3600);
+        _catalogue.Expire(expireOwners: true);
+        Assert.Equal("paused", Session.State);
+        _clock.Advance(3600);
+        _catalogue.Expire(expireOwners: true);
+        Assert.Equal("ended", Session.State);
+    }
+
+    [Fact]
+    public void PausedSpotifySessionLoadedAtStartupStillExpires()
+    {
+        _catalogue.BeginGeneration();
+        Accepted(Event("start", 1));
+        Accepted(Event("play", 2));
+        Accepted(Event("pause", 3));
+        var restarted = new SessionCatalogueService(_store, _clock, _registry);
+        restarted.BeginGeneration();
+        restarted.Expire(expireOwners: true);
+        _clock.Advance((int)SessionCatalogueService.PausedSpotifyLimit.TotalSeconds - 1);
+        restarted.Expire(expireOwners: true);
+        Assert.Equal("paused", Session.State);
+        _clock.Advance(1);
+        restarted.Expire(expireOwners: true);
+        Assert.Equal("ended", Session.State);
+    }
+
+    [Fact]
+    public void PausedCastingSessionsAreNotEndedByTheSpotifyLimit()
+    {
+        _catalogue.BeginGeneration();
+        Accepted(CastingEvent("start", 1));
+        Accepted(CastingEvent("play", 2));
+        Accepted(CastingEvent("pause", 3));
+        _catalogue.Expire(expireOwners: false);
+        _clock.Advance((int)SessionCatalogueService.PausedSpotifyLimit.TotalSeconds + 3600);
+        _catalogue.Expire(expireOwners: false);
+        Assert.Equal("paused", Session.State);
+    }
+
+    [Fact]
+    public void ProducerVolumeZeroKeepsTheSessionSelectedButSilent()
+    {
+        ProfilePlaybackCoordinator coordinator = PrepareSpotifyGains();
+        coordinator.Lifecycle(Payload(Event("heartbeat", 2), 0));
+        // Receivers drop a session whose gain is 0, so a muted Spotify app would let another claimant play.
+        Assert.InRange(SpotifyGain(coordinator), double.Epsilon, ProfilePositionService.SilentGain);
+        _store.Save(_store.Current with { Groups = [_store.Current.Groups.Single() with { Muted = true }] });
+        Assert.Equal(0, SpotifyGain(coordinator));
+        _store.Save(_store.Current with { Groups = [_store.Current.Groups.Single() with { Muted = false, MasterVolume = 0 }] });
+        Assert.Equal(0, SpotifyGain(coordinator));
+    }
+
+    [Fact]
+    public void FailedProducerVolumeSaveIsRetriedAfterTheInterval()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"syren-volumes-{Guid.NewGuid():N}");
+        string path = Path.Combine(directory, ProducerVolumeStore.FileName);
+        try
+        {
+            // A directory in place of the file makes the write fail.
+            Directory.CreateDirectory(path);
+            var volumes = new ProducerVolumeStore(path, _clock);
+            volumes.Set("first", 0.5);
+            volumes.SaveIfDue();
+            Assert.True(Directory.Exists(path));
+            Assert.Empty(Directory.GetFiles(directory));
+            Directory.Delete(path);
+            volumes.SaveIfDue();
+            Assert.False(File.Exists(path));
+            Assert.Equal(0.5, volumes.Volume("first"));
+            _clock.Advance((int)ProducerVolumeStore.SaveInterval.TotalSeconds);
+            volumes.SaveIfDue();
+            Assert.Equal(0.5, SavedVolumes(path)["first"]);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PausedSpotifyPeriodSurvivesAServerRestart()
+    {
+        _catalogue.BeginGeneration();
+        Accepted(Event("start", 1));
+        Accepted(Event("play", 2));
+        Accepted(Event("pause", 3));
+        _catalogue.Expire(expireOwners: true);
+        _clock.Advance(11 * 3600);
+        _catalogue.Expire(expireOwners: true);
+        Assert.Equal(_clock.GetUtcNow().AddHours(-11), Session.PausedAt);
+        Assert.Contains("\"pausedAt\"", JsonSerializer.Serialize(Session));
+        Assert.DoesNotContain("pausedAt", JsonSerializer.Serialize(_catalogue.Snapshot()));
+        var restarted = new SessionCatalogueService(_store, _clock, _registry);
+        restarted.BeginGeneration();
+        restarted.Expire(expireOwners: true);
+        Assert.Equal("paused", Session.State);
+        _clock.Advance(3600 - 1);
+        restarted.Expire(expireOwners: true);
+        Assert.Equal("paused", Session.State);
+        _clock.Advance(1);
+        restarted.Expire(expireOwners: true);
+        Assert.Equal("ended", Session.State);
+        Assert.Null(Session.PausedAt);
+    }
+
+    [Fact]
+    public void PausedSpotifyPeriodIgnoresWallClockStepsWhileRunning()
+    {
+        _catalogue.BeginGeneration();
+        Accepted(Event("start", 1));
+        Accepted(Event("play", 2));
+        Accepted(Event("pause", 3));
+        _catalogue.Expire(expireOwners: true);
+        _clock.StepWallClock(24 * 3600);
+        _catalogue.Expire(expireOwners: true);
+        Assert.Equal("paused", Session.State);
+        Accepted(Event("play", 4));
+        Assert.Null(Session.PausedAt);
+        _clock.Advance(3600);
+        Accepted(Event("pause", 5));
+        Assert.Equal(_clock.GetUtcNow(), Session.PausedAt);
+        // A repeated pause keeps the original start.
+        _clock.Advance(60);
+        Accepted(Event("pause", 6));
+        Assert.Equal(_clock.GetUtcNow().AddSeconds(-60), Session.PausedAt);
+    }
+
+    // A Spotify guest session on a speaker at 80 percent in a group at 50 percent, so its gain starts at 0.4.
+    private ProfilePlaybackCoordinator PrepareSpotifyGains(ProducerVolumeStore? volumes = null)
+    {
+        _store.Save(_store.Current with
+        {
+            Speakers = [new PersistentSpeakerState { SpeakerId = "speaker", Name = "Speaker", SensorId = "sensor", SnapClientId = "client", Volume = 80, Connected = false }],
+            Groups = [new PersistentPlaybackGroup { Id = "group", Name = "Group", SpeakerIds = ["speaker"], SourcePriority = ["spotify", "laptop"], MasterVolume = 50 }],
+        });
+        _catalogue.BeginGeneration();
+        ProfilePlaybackCoordinator coordinator = Coordinator(volumes: volumes);
+        Assert.Equal(LifecycleOutcome.Accepted, coordinator.Lifecycle(Payload(Event("start", 1))));
+        Assert.Equal(LifecycleOutcome.Accepted, coordinator.Lifecycle(Payload(Event("play", 2))));
+        return coordinator;
+    }
+
+    private static JsonElement Payload(SessionLifecycleEvent message, object? volume = null)
+    {
+        JsonObject payload = JsonSerializer.SerializeToNode(message)!.AsObject();
+        if (volume != null)
+        {
+            payload["volume"] = JsonSerializer.SerializeToNode(volume);
+        }
+        return JsonSerializer.SerializeToElement(payload);
+    }
+
+    private static double SpotifyGain(ProfilePlaybackCoordinator coordinator) => JsonSerializer.SerializeToElement(coordinator.Gains())
+        .GetProperty("gains").GetProperty("speaker").GetProperty("session").GetDouble();
+
+    private static Dictionary<string, double> SavedVolumes(string path) =>
+        JsonSerializer.Deserialize<Dictionary<string, double>>(File.ReadAllText(path))!;
+
+    private ProfilePlaybackCoordinator Coordinator(RecordingSnapCastService? snapcast = null, bool casting = false,
+        ProducerVolumeStore? volumes = null)
     {
         snapcast ??= new RecordingSnapCastService();
+        volumes ??= _volumes;
         return new ProfilePlaybackCoordinator(_store,
             TestServices.CreateConfigurationService(_store, new RecordingDistanceService(_store), snapcast, casting: casting),
-            _catalogue, new ProfileConfigurationService(_store, _registry), new ProfilePositionService(_store, _clock),
-            new PcSessionService(_store, _catalogue, snapcast, NullLogger<PcSessionService>.Instance), _registry, _clock);
+            _catalogue, new ProfileConfigurationService(_store, _registry), new ProfilePositionService(_store, _clock, volumes),
+            new PcSessionService(_store, _catalogue, snapcast, NullLogger<PcSessionService>.Instance), _registry, volumes, _clock);
     }
 
     private string Command(string action, string requestId, object fields)

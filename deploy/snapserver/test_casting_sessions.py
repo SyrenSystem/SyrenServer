@@ -7,8 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from casting_sessions import (LANDLOCK_RULES, SAMPLE_FORMAT, SHAIRPORT_PRIORITY, AdapterEvent, AirPlayAdapter, CastingJournal,
-                              CastingMapper, CastingSpec, MetadataParser, TraceFormatter, allocate_slots,
-                              casting_destinations, display_name, instance_command, render_config)
+                              CastingMapper, CastingSpec, MetadataParser, TraceFormatter, airplay_attenuation, airplay_gain,
+                              allocate_slots, casting_destinations, display_name, instance_command, parse_volume,
+                              render_config)
 from spotify_sessions import LifecycleJournal, receiver_identity
 
 # Every key the pinned shairport-sync reads from these sections (shairport.c, audio.c and the pipe backend).
@@ -24,6 +25,12 @@ KNOWN_KEYS = {
     'diagnostics.log_verbosity',
 }
 IDENTITY = '7b3f19c2d4e1aa00bb11cc22dd33ee44ff556677'
+# vol2attn from the pinned common.c compiled with gcc for volume_range_db 60: volume, hundredths of a dB, linear gain.
+SHAIRPORT_VOLUMES = (
+    (-30.0, -6000.0, 0.001), (-29.75, -5884.6153846154, 0.001142068906), (-24.0, -3420.0, 0.019498445998),
+    (-17.0, -2160.0, 0.083176377110), (-15.0, -1800.0, 0.125892541179), (-12.5, -1350.0, 0.211348903984),
+    (-5.0, -500.0, 0.562341325190), (-0.25, -25.0, 0.971627951577), (0.0, 0.0, 1.0),
+)
 
 
 def item(code, value=None, kind='ssnc'):
@@ -154,6 +161,36 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(('0', '1'), (parse_config(text)['diagnostics.log_verbosity'],
                                       parse_config(render_config(specification, log_verbosity=1))['diagnostics.log_verbosity']))
         self.assertEqual(Path('/tmp/syren-casting/airplay-' + IDENTITY + '.conf'), specification.config)
+        # The server applies the sender volume after the buffer, so shairport-sync passes the audio through untouched.
+        self.assertEqual(('"yes"', '60', '"standard"'), (values['general.ignore_volume_control'], values['general.volume_range_db'],
+                                                        values['general.volume_control_profile']))
+
+    def test_sender_volume_maps_to_the_gain_shairport_sync_applied_itself(self):
+        for volume, attenuation, gain in SHAIRPORT_VOLUMES:
+            self.assertAlmostEqual(attenuation, airplay_attenuation(volume), places=6)
+            self.assertAlmostEqual(gain, airplay_gain(volume), places=9)
+        # Mute keeps a tiny gain, because a receiver hands a room with zero gain to another session.
+        self.assertEqual(0.000001, airplay_gain(-144.0))
+        self.assertLess(airplay_gain(-144.0), airplay_gain(-30.0))
+        # A volume outside the range got the lowest level.
+        self.assertAlmostEqual(0.001, airplay_gain(-31.0), places=12)
+        self.assertAlmostEqual(0.001, airplay_gain(0.5), places=12)
+        gains = [airplay_gain(step / 4) for step in range(-120, 1)]
+        self.assertEqual(gains, sorted(gains))
+
+    def test_pvol_parsing_takes_the_sender_volume_and_rejects_garbage(self):
+        self.assertEqual(-24.0, parse_volume(b'-24.00,0.00,0.00,0.00'))
+        self.assertEqual(-144.0, parse_volume(b'-144.00,0.00,0.00,0.00'))
+        # With the volume in use the dB fields are filled, and only the first field counts.
+        self.assertEqual(-15.0, parse_volume(b'-15.00,-18.00,-60.00,0.00'))
+        for data in (None, b'', b'loud,0,0,0', b'nan,0.00,0.00,0.00', b'inf', b'\xff\xfe', b',,,'):
+            self.assertIsNone(parse_volume(data))
+        adapter = AirPlayAdapter()
+        self.assertEqual([AdapterEvent('volume', round(0.019498445998, 6))], adapter.feed('ssnc', 'pvol', b'-24.00,0.00,0.00,0.00'))
+        self.assertEqual([AdapterEvent('volume', 0.000001)], adapter.feed('ssnc', 'pvol', b'-144.00,0.00,0.00,0.00'))
+        self.assertEqual([AdapterEvent('volume', 1.0)], adapter.feed('ssnc', 'pvol', b'0.00,0.00,0.00,0.00'))
+        self.assertEqual([], adapter.feed('ssnc', 'pvol', b'nan,0.00,0.00,0.00'))
+        self.assertEqual([], adapter.feed('core', 'pvol', b'0.00,0.00,0.00,0.00'))
 
     def test_instance_command_confines_the_file_system_and_never_grants_the_state_volume(self):
         specification = CastingSpec(IDENTITY, 'office', 'SyrenSystem', 0)
@@ -400,6 +437,36 @@ class MapperTests(unittest.TestCase):
         self.journal.acknowledge({'sessions': [{'id': session, 'eventSequence': 3, 'state': 'paused'}]})
         self.assertEqual(3, self.journal.heartbeat(self.specification, 1)['eventSequence'])
 
+    def test_the_sender_volume_is_tracked_but_never_journaled(self):
+        self.playing()
+        stored, actions = self.stored(), self.actions()
+        self.assertIsNone(self.mapper.volume)
+        self.send(('pvol', '-15.00,0.00,0.00,0.00'))
+        self.assertEqual(round(0.125892541179, 6), self.mapper.volume)
+        self.send(('pvol', '-144.00,0.00,0.00,0.00'))
+        self.assertEqual(0.000001, self.mapper.volume)
+        self.send(('pvol', 'garbage'))
+        self.assertEqual(0.000001, self.mapper.volume)
+        self.assertEqual((stored, actions), (self.stored(), self.actions()))
+        session = self.events()[0]['sessionId']
+        self.journal.acknowledge({'sessions': [{'id': session, 'eventSequence': 2, 'state': 'playing'}]})
+        self.assertNotIn('volume', self.journal.heartbeat(self.specification, 1))
+        # A volume that arrives before the sender has a key still counts for its session.
+        self.send(('conn', '192.0.2.11'), ('pvol', '0.00,0.00,0.00,0.00'))
+        self.assertEqual(1.0, self.mapper.volume)
+
+    def test_a_new_sender_or_a_stopped_instance_forgets_the_volume(self):
+        self.playing()
+        self.send(('pvol', '-5.00,0.00,0.00,0.00'))
+        self.assertEqual(round(0.562341325190, 6), self.mapper.volume)
+        self.send('syen')
+        self.assertEqual(round(0.562341325190, 6), self.mapper.volume)
+        self.send(*connect(device='0A:00:00:00:00:01'))
+        self.assertIsNone(self.mapper.volume)
+        self.send(('pvol', '-5.00,0.00,0.00,0.00'))
+        self.mapper.stop()
+        self.assertIsNone(self.mapper.volume)
+
     def stored(self):
         return self.journal.path.read_text()
 
@@ -457,12 +524,14 @@ class MapperTests(unittest.TestCase):
         lines.append(formatter.format(2, 'core', 'asar', b'Private artist'))
         lines.append(formatter.format(2, 'ssnc', 'styp', b'Buffered'))
         lines.append(formatter.format(2, 'ssnc', 'pbeg', None))
+        lines.append(formatter.format(2, 'ssnc', 'pvol', b'-24.00,0.00,0.00,0.00'))
         text = '\n'.join(lines)
         for value in list(private.values()) + ['Private artist']:
             self.assertNotIn(value, text)
         self.assertEqual(['airplay[2] conn 10 <ip 1>', 'airplay[2] clip 10 <ip 1>', 'airplay[2] svip 10 <ip 2>',
                           "airplay[2] snam 12 <name 1>", 'airplay[2] cdid 17 <cdid 1>'], lines[:5])
-        self.assertEqual(['airplay[2] asar 14', 'airplay[2] styp 8 Buffered', 'airplay[2] pbeg 0'], lines[-3:])
+        self.assertEqual(['airplay[2] asar 14', 'airplay[2] styp 8 Buffered', 'airplay[2] pbeg 0',
+                          'airplay[2] pvol 21 -24.00,0.00,0.00,0.00'], lines[-4:])
         self.assertEqual('airplay[1] cdid 17 <cdid 1>', formatter.format(1, 'ssnc', 'cdid', b'A1:B2:C3:D4:E5:F6'))
         self.assertEqual('airplay[1] cdid 17 <cdid 2>', formatter.format(1, 'ssnc', 'cdid', b'F6:E5:D4:C3:B2:A1'))
 

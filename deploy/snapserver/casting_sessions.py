@@ -3,6 +3,7 @@
 import base64
 import binascii
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import re
 import time
@@ -23,6 +24,11 @@ METADATA_LIMIT = 1024 * 1024
 IDENTITY_WAIT = 1.0
 RECONNECT_GRACE = 5
 LEVEL_WAIT = 4
+# The sender volume runs from -30 to 0, and -144 means mute.
+VOLUME_RANGE_DB = 60
+MUTE_VOLUME = -144.0
+# Mute keeps a tiny gain (about -120 dB), because a receiver hands a room with zero gain to another session.
+MUTE_GAIN = 0.000001
 
 # The instance gets nothing under /var/lib/snapserver, where the Spotify credentials and journals live.
 # These are file rules only, so the instance can still reach the network.
@@ -151,8 +157,8 @@ general = {{
   nqptp_shared_memory_interface_name = {config_string(specification.shm_name)};
   mdns_backend = "avahi";
   output_backend = "pipe";
-  ignore_volume_control = "no";
-  volume_range_db = 60;
+  ignore_volume_control = "yes";
+  volume_range_db = {VOLUME_RANGE_DB};
   volume_control_profile = "standard";
   audio_backend_latency_offset_in_seconds = 0.0;
   audio_decoded_buffer_desired_length_in_seconds = 5.0;
@@ -212,6 +218,38 @@ ITEM = re.compile(rb'<item><type>([0-9a-fA-F]{1,8})</type><code>([0-9a-fA-F]{1,8
                   rb'(?:\n<data encoding="base64">\n([A-Za-z0-9+/=\r\n]*)</data>)?</item>')
 
 
+def airplay_attenuation(volume, max_db=0, min_db=-100 * VOLUME_RANGE_DB):
+    # The standard profile of shairport-sync (vol2attn in common.c), in hundredths of a dB.
+    if not -30.0 <= volume <= 0.0:
+        return min_db
+    range_db = max_db - min_db
+    first_slope = -(range_db // 2)
+    if -range_db > first_slope:
+        first_slope = range_db
+    lines = ((0, first_slope), (-5, first_slope - (range_db + first_slope) / 2), (-17, -range_db))
+    setting = 0
+    for start, end in lines:
+        if volume <= start:
+            setting = min(setting, end * (volume - start) / (-30 - start))
+    return setting + max_db
+
+
+def airplay_gain(volume):
+    # The linear gain shairport-sync applied itself before it ignored the volume, so loudness stays the same.
+    if volume == MUTE_VOLUME:
+        return MUTE_GAIN
+    return 10 ** (airplay_attenuation(volume) / 2000)
+
+
+def parse_volume(data):
+    # A pvol item starts with the sender volume, and the dB fields after it are zero when shairport-sync ignores it.
+    try:
+        volume = float((data or b'').decode('ascii').split(',')[0])
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return volume if math.isfinite(volume) else None
+
+
 def metadata_code(value):
     return bytes.fromhex(value.decode().zfill(8)).decode('latin-1')
 
@@ -254,9 +292,9 @@ class MetadataParser:
 
 @dataclass(frozen=True)
 class AdapterEvent:
-    # Kinds: sender, identity, play, pause, stream_up, stream_down, output, released and level.
+    # Kinds: sender, identity, play, pause, stream_up, stream_down, output, released, level and volume.
     kind: str
-    value: str | None = None
+    value: str | float | None = None
     field: str | None = None
     delay: float = 0.0
 
@@ -308,6 +346,9 @@ class AirPlayAdapter:
             return [AdapterEvent('stream_down')]
         if code == 'odsc':
             return [AdapterEvent('output', value)]
+        if code == 'pvol':
+            volume = parse_volume(data)
+            return [] if volume is None else [AdapterEvent('volume', round(airplay_gain(volume), 6))]
         if code in ('prmp', 'syen'):
             self.stream_type = self.dacp = None
             return [AdapterEvent('released')]
@@ -330,6 +371,8 @@ class CastingMapper:
         self.hold_until = None
         self.stream = None
         self.wrong_output = False
+        # The sender volume as a linear gain, or None until the sender gives one.
+        self.volume = None
         self.clear_session()
 
     def clear_session(self):
@@ -383,10 +426,14 @@ class CastingMapper:
                 self.release(now)
             self.principal = {'address': event.value, 'fields': {}, 'since': now, 'key': None, 'queue': []}
             self.stream = None
-            # The output format belongs to one sender's stream, so a new sender starts without the old fault.
+            # The output format and volume belong to one sender, so a new sender starts without the old ones.
             self.wrong_output = False
+            self.volume = None
         elif self.principal is None:
             return
+        elif event.kind == 'volume':
+            # The volume is never a lifecycle event, so it waits for no identity and only goes out with heartbeats.
+            self.volume = event.value
         elif event.kind == 'identity':
             if self.principal['key'] is not None:
                 return
@@ -490,7 +537,7 @@ class CastingMapper:
 
 TRACE_KINDS = {'conn': 'ip', 'clip': 'ip', 'svip': 'ip', 'snam': 'name', 'cdid': 'cdid', 'cmac': 'mac',
                'cmod': 'model', 'daid': 'daid', 'acre': 'acre'}
-TRACE_VALUES = ('styp', 'sdsc', 'odsc')
+TRACE_VALUES = ('styp', 'sdsc', 'odsc', 'pvol')
 
 
 class TraceFormatter:

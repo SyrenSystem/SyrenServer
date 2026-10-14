@@ -27,6 +27,21 @@ RECONCILE_RETRY_LIMIT = 10
 SNAPCAST_REPLY_SECONDS = 3
 PENDING_LINK_SECONDS = 900
 GUEST_ACCOUNTS_PER_DESTINATION = 4
+# Spotify streams reach the speakers lossless; casting keeps its own codec.
+SPOTIFY_CODEC = 'flac'
+# Librespot reports volume as a whole number up to this value.
+LIBRESPOT_MAX_VOLUME = 65535
+
+
+def saved_volume(path):
+    # Librespot ignores a saved volume it cannot parse, for example one left empty by an interrupted write.
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    if not re.fullmatch('[0-9]+', text) or int(text) > LIBRESPOT_MAX_VOLUME:
+        return None
+    return int(text)
 
 
 def private_directory(path):
@@ -125,12 +140,12 @@ class SnapControl:
     def streams(self):
         return {stream['id'] for stream in self.request('Server.GetStatus')['server']['streams']}
 
-    def ensure_stream(self, specification, fifo, streams, sample_format='44100:16:2'):
+    def ensure_stream(self, specification, fifo, streams, sample_format='44100:16:2', codec='pcm'):
         if specification.stream in streams:
             return
         if not fifo.exists():
             os.mkfifo(fifo, 0o600)
-        uri = f'pipe://{fifo}?name={specification.stream}&sampleformat={sample_format}&codec=pcm'
+        uri = f'pipe://{fifo}?name={specification.stream}&sampleformat={sample_format}&codec={codec}'
         self.request('Stream.AddStream', {'streamUri': uri})
         streams.add(specification.stream)
 
@@ -161,6 +176,7 @@ class SpotifySupervisor:
         self.next_reconcile = 0
         self.reconcile_delay = RECONCILE_RETRY_SECONDS
         self.heartbeats = ()
+        self.volume_lock = threading.Lock()
 
     def account_directory(self, profile):
         return private_directory(self.root / 'accounts' / hashlib.sha256(profile.encode()).hexdigest())
@@ -171,7 +187,10 @@ class SpotifySupervisor:
     def command(self, specification, cache):
         command = ['/usr/local/bin/librespot', '--name', specification.name, '--device-id', specification.identity,
                    '--system-cache', str(cache), '--disable-audio-cache', '--backend', 'pipe', '--format', 'S16',
-                   '--dither', 'none', '--volume-ctrl', 'linear', '--initial-volume', '100', '--bitrate', '320', '--ap-port', '443']
+                   '--dither', 'none', '--volume-ctrl', 'linear', '--external-volume', '--bitrate', '320', '--ap-port', '443']
+        # The server applies the volume after the buffer, and librespot restores a saved volume only without an initial one.
+        if saved_volume(cache / 'volume') is None:
+            command += ['--initial-volume', '100']
         if specification.guest:
             command.append('--lock-discovery-account')
             if self.discovery:
@@ -205,8 +224,15 @@ class SpotifySupervisor:
         def idle(guest):
             return self.journal.state['receivers'].get(guest['identity'], {}).get('sessionId') is None
 
+        def released(guest):
+            # A guest account that now belongs to a profile keeps its slot only while it plays.
+            # One without a process yet (after a restart) is started first, so its open session ends through reconcile.
+            running = self.processes.get(guest['identity'])
+            return guest.get('account') in linked and ((running is None and idle(guest)) or
+                                                      (running is not None and not running['playing']))
+
         guests = [guest for guest in self.guests.get(self.configuration['stateId'], [])
-                  if guest['destination'] in valid_destinations and not (guest.get('account') in linked and idle(guest))]
+                  if guest['destination'] in valid_destinations and not released(guest)]
         retained = []
         for destination in valid_destinations:
             claimed = sorted((guest for guest in guests if guest['destination'] == destination and guest.get('account')),
@@ -229,7 +255,7 @@ class SpotifySupervisor:
         elif (cache / 'credentials.json').exists():
             credentials(cache / 'credentials.json')
         fifo = self.runtime / (specification.stream + '.fifo')
-        self.snapcast.ensure_stream(specification, fifo, streams)
+        self.snapcast.ensure_stream(specification, fifo, streams, codec=SPOTIFY_CODEC)
         instance = uuid.uuid4().hex
         name_file = cache / 'name.txt'
         name_file.write_text(specification.name)
@@ -297,7 +323,8 @@ class SpotifySupervisor:
                         (self.receiver_directory(identity) / 'name.txt').write_text(specification.name)
                         running['specification'] = specification
                 if identity in self.processes:
-                    self.snapcast.ensure_stream(specification, self.runtime / (specification.stream + '.fifo'), streams)
+                    self.snapcast.ensure_stream(specification, self.runtime / (specification.stream + '.fifo'), streams,
+                                                codec=SPOTIFY_CODEC)
             except (OSError, ValueError, KeyError, RuntimeError) as error:
                 self.failed(identity, error)
         for identity, specification in wanted.items():
@@ -315,6 +342,9 @@ class SpotifySupervisor:
         running = self.processes.get(event.get('receiverId'))
         if not running or event.get('instanceId') != running['instance']:
             return
+        if event['event'] == 'volume_changed':
+            self.volume_changed(running, event.get('volume'))
+            return
         specification = running['specification']
         account = event.get('accountId')
         if specification.guest and account:
@@ -327,11 +357,29 @@ class SpotifySupervisor:
                         atomic_json(self.root / 'guests.json', self.guests)
         elif account and account != specification.account:
             return
-        if event['event'] == 'playing':
+        # A play request counts as playing while its first track loads, so reconcile keeps a linked guest.
+        if event['event'] == 'playing' or event.get('action') == 'play':
             running['playing'] = True
-        elif event['event'] in ('loading', 'stopped', 'unavailable') or event.get('action') in ('pause', 'end', 'interrupt'):
+        elif event['event'] in ('stopped', 'unavailable') or event.get('action') in ('pause', 'end', 'interrupt'):
             running['playing'] = False
         self.journal.handle(specification, event)
+
+    def volume_changed(self, running, volume):
+        # Only the newest volume matters, so it rides on heartbeats and never enters the journal.
+        try:
+            volume = int(volume)
+        except (TypeError, ValueError):
+            return
+        if not 0 <= volume <= LIBRESPOT_MAX_VOLUME or running.get('volume') == volume / LIBRESPOT_MAX_VOLUME:
+            return
+        # The lock keeps the heartbeat thread from sending the older volume after this one.
+        with self.volume_lock:
+            running['volume'] = volume / LIBRESPOT_MAX_VOLUME
+            if not self.configuration or not self.connected():
+                return
+            event = self.journal.heartbeat(running['specification'], self.configuration['generation'])
+            if event:
+                self.publish('Lifecycle', dict(event, volume=running['volume']), 0)
 
     def begin_link(self, request):
         configuration = self.configuration
@@ -407,15 +455,17 @@ class SpotifySupervisor:
             for running in self.processes.values():
                 event = self.journal.heartbeat(running['specification'], self.configuration['generation'])
                 if event:
-                    heartbeats.append((running['process'], event))
+                    heartbeats.append((running, event))
         self.heartbeats = tuple(heartbeats)
 
     def publish_heartbeats(self):
         if not self.connected():
             return
-        for process, event in self.heartbeats:
-            if process.poll() is None:
-                self.publish('Lifecycle', event, 0)
+        # The volume is read when sent, since it may change after the heartbeats were prepared.
+        with self.volume_lock:
+            for running, event in self.heartbeats:
+                if running['process'].poll() is None:
+                    self.publish('Lifecycle', dict(event, volume=running['volume']) if 'volume' in running else event, 0)
 
     def send_heartbeats(self):
         while not self.stopped.wait(HEARTBEAT_SECONDS):

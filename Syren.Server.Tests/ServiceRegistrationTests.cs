@@ -41,6 +41,8 @@ public sealed class ServiceRegistrationTests
         await distance.StartAsync(CancellationToken.None);
         if (profileSessions)
         {
+            Assert.NotNull(provider.GetRequiredService<ProducerVolumeStore>());
+            Assert.NotNull(provider.GetRequiredService<ProfilePositionService>());
             await Task.Delay(200);
             await distance.StopAsync(CancellationToken.None);
             Assert.Empty(snapcast.VolumeChanges);

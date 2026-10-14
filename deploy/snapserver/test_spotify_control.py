@@ -30,10 +30,12 @@ class FakeSnap(SnapControl):
     def __init__(self):
         super().__init__()
         self.methods = []
+        self.parameters = []
         self.stream_ids = set()
 
     def request(self, method, parameters=None):
         self.methods.append(method)
+        self.parameters.append((method, parameters))
         if method == 'Server.GetStatus':
             return {'server': {'streams': [{'id': identity} for identity in self.stream_ids]}}
         if method == 'Stream.AddStream':
@@ -213,6 +215,157 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(5, len(identities))
         self.assertTrue(all(identity in self.supervisor.processes for identity in identities))
         self.assertEqual(['home'], list(json.loads((self.directory / 'state' / 'guests.json').read_text())))
+
+    def claimed_guest(self, account):
+        self.configure()
+        guest = self.supervisor.guests['home'][0]
+        identity = guest['identity']
+        self.supervisor.event({'receiverId': identity, 'instanceId': self.supervisor.processes[identity]['instance'],
+                               'event': 'syren_intent', 'action': 'play', 'commandId': 'guest', 'accountId': account})
+        self.supervisor.event({'receiverId': identity, 'instanceId': self.supervisor.processes[identity]['instance'],
+                               'event': 'playing', 'accountId': account})
+        return identity
+
+    def test_a_linked_guest_keeps_its_slot_only_while_playing(self):
+        identity = self.claimed_guest('visitor')
+        self.supervisor.publish_pending()
+        self.configure(revision=2, profiles=self.configuration['profiles'] + [{'id': 'third', 'spotifyAccountId': 'visitor'}])
+        self.assertIn(identity, self.supervisor.processes)
+        self.assertIn(identity, [guest['identity'] for guest in self.supervisor.guests['home']])
+        self.supervisor.event({'receiverId': identity, 'instanceId': self.supervisor.processes[identity]['instance'],
+                               'event': 'loading', 'accountId': 'visitor'})
+        self.supervisor.reconcile()
+        self.assertIn(identity, self.supervisor.processes)
+        self.supervisor.event({'receiverId': identity, 'instanceId': self.supervisor.processes[identity]['instance'],
+                               'event': 'syren_intent', 'action': 'pause', 'commandId': 'pause', 'accountId': 'visitor'})
+        self.supervisor.reconcile()
+        self.assertNotIn(identity, self.supervisor.processes)
+        self.assertNotIn(identity, [guest['identity'] for guest in self.supervisor.guests['home']])
+        self.assertEqual('end', self.supervisor.journal.events(1)[-1]['action'])
+        self.assertIn(('Stream.RemoveStream', {'id': 'spotify-' + identity}), self.snap.parameters)
+        self.assertTrue(any(guest.get('account') is None for guest in self.supervisor.guests['home']))
+
+    def test_a_linked_guest_paused_across_a_restart_still_ends_its_session(self):
+        identity = self.claimed_guest('visitor')
+        del self.supervisor.processes[identity]
+        self.configure(revision=2, profiles=self.configuration['profiles'] + [{'id': 'third', 'spotifyAccountId': 'visitor'}])
+        self.assertIn(identity, self.supervisor.processes)
+        self.supervisor.reconcile()
+        self.assertNotIn(identity, self.supervisor.processes)
+        self.assertIsNone(self.supervisor.journal.receiver(identity)['sessionId'])
+        self.assertEqual('end', self.supervisor.journal.events(1)[-1]['action'])
+        self.assertIn(('Stream.RemoveStream', {'id': 'spotify-' + identity}), self.snap.parameters)
+
+    def test_a_linked_guest_survives_reconcile_while_its_first_track_loads(self):
+        self.configure()
+        identity = self.supervisor.guests['home'][0]['identity']
+        instance = self.supervisor.processes[identity]['instance']
+        self.supervisor.event({'receiverId': identity, 'instanceId': instance, 'event': 'session_connected', 'accountId': 'one'})
+        self.supervisor.event({'receiverId': identity, 'instanceId': instance, 'event': 'syren_intent', 'action': 'play',
+                               'commandId': 'guest', 'accountId': 'one'})
+        self.supervisor.reconcile()
+        self.assertIn(identity, self.supervisor.processes)
+        self.assertNotIn('end', [event['action'] for event in self.supervisor.journal.events(1)])
+        self.supervisor.event({'receiverId': identity, 'instanceId': instance, 'event': 'stopped', 'accountId': 'one'})
+        self.supervisor.reconcile()
+        self.assertNotIn(identity, self.supervisor.processes)
+
+    def test_an_unlinked_guest_keeps_its_slot_while_paused(self):
+        identity = self.claimed_guest('visitor')
+        self.supervisor.event({'receiverId': identity, 'instanceId': self.supervisor.processes[identity]['instance'],
+                               'event': 'syren_intent', 'action': 'pause', 'commandId': 'pause', 'accountId': 'visitor'})
+        self.supervisor.reconcile()
+        self.assertIn(identity, self.supervisor.processes)
+
+    def test_spotify_streams_use_flac(self):
+        self.configure()
+        uris = [parameters['streamUri'] for method, parameters in self.snap.parameters if method == 'Stream.AddStream']
+        self.assertEqual(3, len(uris))
+        self.assertTrue(all(uri.endswith('&sampleformat=44100:16:2&codec=flac') for uri in uris), uris)
+
+    def test_receivers_keep_the_volume_slider_and_restore_the_saved_volume(self):
+        self.configure()
+        identity = self.personal('first').identity
+        command = self.supervisor.processes[identity]['process'].command
+        self.assertIn('--external-volume', command)
+        self.assertEqual('linear', command[command.index('--volume-ctrl') + 1])
+        self.assertEqual('100', command[command.index('--initial-volume') + 1])
+        (self.directory / 'state' / 'receivers' / identity / 'volume').write_text('32768')
+        del self.supervisor.processes[identity]
+        self.supervisor.reconcile()
+        command = self.supervisor.processes[identity]['process'].command
+        self.assertIn('--external-volume', command)
+        self.assertNotIn('--initial-volume', command)
+
+    def test_an_unreadable_saved_volume_still_starts_at_full_volume(self):
+        self.configure()
+        identity = self.personal('first').identity
+        for saved in ('', '32768\n', '65536', '-1', 'loud'):
+            (self.directory / 'state' / 'receivers' / identity / 'volume').write_text(saved)
+            del self.supervisor.processes[identity]
+            self.supervisor.reconcile()
+            command = self.supervisor.processes[identity]['process'].command
+            self.assertEqual('100', command[command.index('--initial-volume') + 1], saved)
+
+    def volume(self, identity, value):
+        self.supervisor.event({'receiverId': identity, 'instanceId': self.supervisor.processes[identity]['instance'],
+                               'event': 'volume_changed', 'volume': value, 'action': None, 'accountId': None})
+
+    def test_volume_changes_ride_on_heartbeats_and_skip_the_journal(self):
+        self.playing_session()
+        identity = self.personal('first').identity
+        self.supervisor.processes[identity]['playing'] = True
+        self.supervisor.prepare_heartbeats()
+        self.supervisor.publish_heartbeats()
+        self.assertNotIn('volume', self.published[-1][1])
+        journal = (self.directory / 'state' / 'lifecycle.json').read_bytes()
+        self.published.clear()
+        self.volume(identity, '32768')
+        self.assertEqual([('heartbeat', 0)], self.lifecycle())
+        self.assertAlmostEqual(32768 / 65535, self.published[-1][1]['volume'])
+        self.volume(identity, '32768')
+        for value in ('65536', '-1', 'loud', None):
+            self.volume(identity, value)
+        self.assertEqual(1, len(self.published))
+        self.volume(identity, '0')
+        self.assertEqual(0.0, self.published[-1][1]['volume'])
+        self.supervisor.prepare_heartbeats()
+        self.supervisor.publish_heartbeats()
+        self.assertEqual(('heartbeat', 0), self.lifecycle()[-1])
+        self.assertEqual(0.0, self.published[-1][1]['volume'])
+        self.assertTrue(self.supervisor.processes[identity]['playing'])
+        self.assertEqual(journal, (self.directory / 'state' / 'lifecycle.json').read_bytes())
+        self.assertTrue(all('volume' not in event for event in self.supervisor.journal.events(1)))
+
+    def test_a_prepared_heartbeat_never_sends_an_older_volume(self):
+        self.playing_session()
+        identity = self.personal('first').identity
+        self.volume(identity, '100')
+        self.supervisor.prepare_heartbeats()
+        self.volume(identity, '200')
+        self.supervisor.publish_heartbeats()
+        self.assertEqual(('heartbeat', 0), self.lifecycle()[-1])
+        self.assertAlmostEqual(200 / 65535, self.published[-1][1]['volume'])
+
+    def test_volume_waits_for_a_connection(self):
+        self.playing_session()
+        self.online = False
+        self.published.clear()
+        self.volume(self.personal('first').identity, '100')
+        self.assertEqual([], self.published)
+        self.online = True
+        self.supervisor.prepare_heartbeats()
+        self.supervisor.publish_heartbeats()
+        self.assertAlmostEqual(100 / 65535, self.published[-1][1]['volume'])
+
+    def test_loading_keeps_the_receiver_playing(self):
+        self.playing_session()
+        identity = self.personal('first').identity
+        running = self.supervisor.processes[identity]
+        for event in ('playing', 'loading'):
+            self.supervisor.event({'receiverId': identity, 'instanceId': running['instance'], 'event': event})
+        self.assertTrue(running['playing'])
+        self.assertNotIn('interrupt', [event['action'] for event in self.supervisor.journal.events(1)])
 
     def test_guest_receivers_use_the_discovery_address(self):
         self.configure()

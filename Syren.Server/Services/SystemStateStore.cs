@@ -66,42 +66,16 @@ public sealed class SystemStateStore : ISystemStateStore
     private void SaveLocked(PersistentSystemState state)
     {
         PersistentStateFactory.Validate(state);
-        string? directory = Path.GetDirectoryName(_filePath);
-        if (!string.IsNullOrWhiteSpace(directory))
+        AtomicFile.Write(_filePath, stream =>
         {
-            Directory.CreateDirectory(directory);
-        }
-        string temporaryPath = $"{_filePath}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            using (var stream = new FileStream(
-                temporaryPath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                4096,
-                FileOptions.WriteThrough
-            ))
+            JsonNode document = JsonSerializer.SerializeToNode(state, SerializerOptions)!;
+            if (state.Version == 3)
             {
-                JsonNode document = JsonSerializer.SerializeToNode(state, SerializerOptions)!;
-                if (state.Version == 3)
-                {
-                    ProfileGroupSchema.ToProfileNames(document["groups"]);
-                }
-                JsonSerializer.Serialize(stream, document, SerializerOptions);
-                stream.Flush(flushToDisk: true);
+                ProfileGroupSchema.ToProfileNames(document["groups"]);
             }
-
-            File.Move(temporaryPath, _filePath, overwrite: true);
-            Current = state;
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
+            JsonSerializer.Serialize(stream, document, SerializerOptions);
+        });
+        Current = state;
     }
 
     private PersistentSystemState LoadOrCreate()

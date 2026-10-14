@@ -1,0 +1,111 @@
+diff --git a/src/main.rs b/src/main.rs
+index 97675df..12cfebc 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -15,7 +15,7 @@ use librespot::{
+             AudioFormat, Bitrate, NormalisationMethod, NormalisationType, PlayerConfig, VolumeCtrl,
+         },
+         dither,
+-        mixer::{self, MixerConfig, MixerFn},
++        mixer::{self, Mixer, MixerConfig, MixerFn, NoOpVolume, VolumeGetter},
+         player::{Player, coefficient_to_duration, duration_to_coefficient},
+     },
+ };
+@@ -89,6 +89,44 @@ mod device_identity_tests {
+     use sha1::Digest;
+ }
+ 
++// With an external volume the slider stays Spotify state only, and the samples are never scaled.
++fn player_volume(mixer: &dyn Mixer, external_volume: bool) -> Box<dyn VolumeGetter + Send> {
++    if external_volume {
++        Box::new(NoOpVolume)
++    } else {
++        mixer.get_soft_volume()
++    }
++}
++
++#[cfg(test)]
++mod external_volume_tests {
++    use super::{Mixer, MixerConfig, VolumeCtrl, player_volume};
++    use librespot::playback::mixer::softmixer::SoftMixer;
++
++    fn mixer(volume: u16) -> SoftMixer {
++        let mixer = SoftMixer::open(MixerConfig { volume_ctrl: VolumeCtrl::Linear, ..MixerConfig::default() }).unwrap();
++        mixer.set_volume(volume);
++        mixer
++    }
++
++    #[test]
++    fn soft_volume_scales_samples_by_default() {
++        assert_eq!(player_volume(&mixer(0), false).attenuation_factor(), 0.0);
++        assert!(player_volume(&mixer(32768), false).attenuation_factor() < 1.0);
++    }
++
++    #[test]
++    fn external_volume_keeps_the_slider_without_scaling_samples() {
++        let silent = mixer(0);
++        assert_eq!(player_volume(&silent, true).attenuation_factor(), 1.0);
++        assert_eq!(silent.volume(), 0);
++        let half = mixer(32768);
++        assert_eq!(player_volume(&half, true).attenuation_factor(), 1.0);
++        half.set_volume(65535);
++        assert_eq!(half.volume(), 65535);
++    }
++}
++
+ fn usage(program: &str, opts: &getopts::Options) -> String {
+     let repo_home = env!("CARGO_PKG_REPOSITORY");
+     let desc = env!("CARGO_PKG_DESCRIPTION");
+@@ -261,6 +299,7 @@ struct Setup {
+     enable_oauth: bool,
+     enable_device_auth: bool,
+     lock_discovery_account: bool,
++    external_volume: bool,
+     oauth_port: Option<u16>,
+     zeroconf_port: u16,
+     player_event_program: Option<String>,
+@@ -293,6 +332,7 @@ async fn get_setup() -> Setup {
+     const DISABLE_CREDENTIAL_CACHE: &str = "disable-credential-cache";
+     const DISABLE_DISCOVERY: &str = "disable-discovery";
+     const LOCK_DISCOVERY_ACCOUNT: &str = "lock-discovery-account";
++    const EXTERNAL_VOLUME: &str = "external-volume";
+     const DISABLE_GAPLESS: &str = "disable-gapless";
+     const DITHER: &str = "dither";
+     const EMIT_SINK_EVENTS: &str = "emit-sink-events";
+@@ -497,6 +537,11 @@ async fn get_setup() -> Setup {
+         LOCK_DISCOVERY_ACCOUNT,
+         "Close local discovery after the first account connects.",
+     )
++    .optflag(
++        "",
++        EXTERNAL_VOLUME,
++        "Keep the volume control and events, but leave the audio unscaled for another program to apply.",
++    )
+     .optopt(
+         NAME_SHORT,
+         NAME,
+@@ -1271,6 +1316,7 @@ async fn get_setup() -> Setup {
+     };
+ 
+     let lock_discovery_account = opt_present(LOCK_DISCOVERY_ACCOUNT);
++    let external_volume = opt_present(EXTERNAL_VOLUME);
+     let credentials = {
+         let cached_creds = cache.as_ref().and_then(Cache::credentials);
+ 
+@@ -1947,6 +1993,7 @@ async fn get_setup() -> Setup {
+         enable_oauth,
+         enable_device_auth,
+         lock_discovery_account,
++        external_volume,
+         oauth_port,
+         zeroconf_port,
+         player_event_program,
+@@ -2103,7 +2150,7 @@ async fn main() {
+     };
+     let player_config = setup.player_config.clone();
+ 
+-    let soft_volume = mixer.get_soft_volume();
++    let soft_volume = player_volume(mixer.as_ref(), setup.external_volume);
+     let format = setup.format;
+     let backend = setup.backend;
+     let device = setup.device.clone();

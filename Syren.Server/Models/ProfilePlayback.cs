@@ -104,10 +104,14 @@ public sealed record PlaybackSession
     // The server decides this so receivers never compare clocks.
     [JsonPropertyName("eligible")]
     public bool Eligible { get; init; }
+    // When the current pause began, saved so a server restart does not restart the paused period.
+    [JsonPropertyName("pausedAt")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? PausedAt { get; init; }
 
     public PlaybackSession End() => this with
     {
-        State = "ended", Claimed = false, Eligible = false, Transports = [], InterruptedAt = null,
+        State = "ended", Claimed = false, Eligible = false, Transports = [], InterruptedAt = null, PausedAt = null,
     };
 }
 

@@ -18,12 +18,14 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
     public static readonly TimeSpan InterruptionGrace = TimeSpan.FromSeconds(3);
     public static readonly TimeSpan EndedRetention = TimeSpan.FromHours(1);
     public static readonly TimeSpan CastingSilence = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan PausedSpotifyLimit = TimeSpan.FromHours(12);
     private static readonly Regex CastingAccount = new(@"^[\x21-\x7e]{1,256}\z", RegexOptions.CultureInvariant);
 
     // Liveness stays in memory so heartbeats never write the state file.
     // Monotonic timestamps keep liveness steady when the wall clock steps.
     private readonly ConcurrentDictionary<string, long> _heartbeats = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, long> _endedSince = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, long> _pausedSince = new(StringComparer.Ordinal);
 
     public long Generation => store.Current.Generation;
 
@@ -64,7 +66,8 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
             ConfigurationRevision = current.Revision,
             Profiles = current.Profiles.ToArray(),
             // The account stays on the server so guest usernames never reach the retained topic.
-            Sessions = current.Sessions.Select(session => session with { AccountId = null }).ToArray(),
+            // The pause time is only for expiry, so the published catalogue keeps its shape.
+            Sessions = current.Sessions.Select(session => session with { AccountId = null, PausedAt = null }).ToArray(),
             SourcePolicies = new(current.SourcePolicies),
         };
     }
@@ -166,8 +169,10 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                     updated = updated with { State = session.Source == "laptop" ? "playing" : "connected" };
                     break;
                 case "play":
+                    // A pause, play and pause between two expiry passes still starts a fresh paused period.
+                    _pausedSince.TryRemove(session.Id, out _);
                     claim = !session.Claimed;
-                    updated = updated with { State = "playing", InterruptedAt = null };
+                    updated = updated with { State = "playing", InterruptedAt = null, PausedAt = null };
                     break;
                 case "pause":
                     updated = updated with
@@ -175,6 +180,7 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                         State = "paused",
                         Claimed = current.SourcePolicies[session.Source] == "connected" && session.Claimed,
                         InterruptedAt = null,
+                        PausedAt = session.State == "paused" ? session.PausedAt : now,
                     };
                     break;
                 case "end":
@@ -239,7 +245,7 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
         return outcome;
     }
 
-    // Ends silent PC and casting owners, updates eligibility as grace periods pass, and drops old ended sessions.
+    // Ends silent PC and casting owners and long paused Spotify sessions, updates eligibility as grace periods pass, and drops old ended sessions.
     public void Expire(bool expireOwners)
     {
         DateTimeOffset now = clock.GetUtcNow();
@@ -261,10 +267,9 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
                     }
                     continue;
                 }
-                PlaybackSession updated = expireOwners && ((session.Source == "laptop" && !Alive(session.Id)) ||
-                    (session.Source == "casting" && Silent(session.Id, CastingSilence)))
-                    ? session.End()
-                    : Evaluate(session, now);
+                bool silentOwner = expireOwners && ((session.Source == "laptop" && !Alive(session.Id)) ||
+                    (session.Source == "casting" && Silent(session.Id, CastingSilence)));
+                PlaybackSession updated = silentOwner || PausedTooLong(session, now) ? session.End() : Evaluate(session, now);
                 changed |= !Same(updated, session);
                 sessions.Add(updated);
             }
@@ -279,6 +284,12 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
             foreach (string identity in _endedSince.Keys.Where(identity => !known.Contains(identity)))
             {
                 _endedSince.TryRemove(identity, out _);
+            }
+            HashSet<string> paused = sessions.Where(session => session.State == "paused")
+                .Select(session => session.Id).ToHashSet(StringComparer.Ordinal);
+            foreach (string identity in _pausedSince.Keys.Where(identity => !paused.Contains(identity)))
+            {
+                _pausedSince.TryRemove(identity, out _);
             }
             return changed ? current with
             {
@@ -336,6 +347,20 @@ public sealed class SessionCatalogueService(ISystemStateStore store, TimeProvide
     }
 
     private bool Alive(string sessionId) => !Silent(sessionId, InterruptionGrace);
+
+    // The first expiry pass turns the saved pause time into a monotonic start, so only a wall clock step across a restart can shift it.
+    private bool PausedTooLong(PlaybackSession session, DateTimeOffset now) => session.Source == "spotify" &&
+        session.State == "paused" && clock.GetElapsedTime(_pausedSince.GetOrAdd(session.Id, _ => PausedStart(session, now))) >=
+        PausedSpotifyLimit;
+
+    // Sessions saved before the pause time existed start counting now.
+    private long PausedStart(PlaybackSession session, DateTimeOffset now)
+    {
+        TimeSpan paused = session.PausedAt is { } pausedAt
+            ? TimeSpan.FromTicks(Math.Clamp((now - pausedAt).Ticks, 0, PausedSpotifyLimit.Ticks))
+            : TimeSpan.Zero;
+        return clock.GetTimestamp() - (long)(paused.TotalSeconds * clock.TimestampFrequency);
+    }
 
     private bool Silent(string sessionId, TimeSpan limit) =>
         !_heartbeats.TryGetValue(sessionId, out long heartbeat) || clock.GetElapsedTime(heartbeat) >= limit;

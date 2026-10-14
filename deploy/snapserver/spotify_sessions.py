@@ -143,7 +143,8 @@ class LifecycleJournal:
                 self.save()
         elif event['event'] == 'playing':
             self.emit(specification, 'transport')
-        elif event['event'] in ('loading', 'stopped', 'unavailable'):
+        elif event['event'] in ('stopped', 'unavailable'):
+            # Loading a new track keeps the transport, so skipping never interrupts the session.
             self.emit(specification, 'interrupt')
 
     def heartbeat(self, specification, generation):
